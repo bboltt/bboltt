@@ -1,137 +1,120 @@
-**Month 1: Target Definition, Rapid Data Prep, Initial Modeling**
+Proposed 3-Month Timeline and Activities
+Month 1: Target Definition, Rapid Data Prep, Initial Modeling
 
-- **Week 1-2** (Lead DS & DS #2):  
-  - **Define Targets**:  
-    - Client-level attrition: Zero revenue generated in a set time horizon (e.g., next quarter).  
-    - Product-level attrition: Discontinuation or zero usage of a specific product line.  
-  - **Data Retrieval & Quick Prep**:  
-    - Acquire necessary data: transaction history, client profiles, product usage logs, historical interventions (when, what kind), relationship manager interactions.  
-    - Create initial joined datasets keyed by client and product.
-  - **Intervention Bias Assessment**:  
-    - Identify what interventions were applied historically and when.  
-    - Check if older (pre-intervention) or control-like data exist.  
-    - Prepare flags/indicators for interventions.
+Week 1-2 (Lead DS & DS #2):
 
-- **Week 3** (DS #3 & Lead DS):  
-  - **Lightweight EDA on Targets**:  
-    - Quickly verify the target variable distributions, attrition rates, and basic segmentations.  
-    - Ensure data consistency and handle obvious missing values.
-  - **Define Preliminary Triggers (Domain-Driven)**:  
-    - Brainstorm with domain experts: what events are known or suspected triggers? Examples:  
-      - Significant withdrawal event (e.g., >30% AUM in 2 weeks)  
-      - Relationship Manager (RM) change event  
-      - Fee increase or product price adjustment event  
-      - Missed scheduled advisory meeting event
-    - Start coding these events as Boolean flags or counters in the dataset.
+Define Targets:
+Client-level attrition: Zero revenue generated in a set time horizon (e.g., next quarter).
+Product-level attrition: Discontinuation or zero usage of a specific product line.
+Data Retrieval & Quick Prep:
+Acquire necessary data: transaction history, client profiles, product usage logs, historical interventions (when, what kind), relationship manager interactions.
+Create initial joined datasets keyed by client and product.
+Intervention Bias Assessment:
+Identify what interventions were applied historically and when.
+Check if older (pre-intervention) or control-like data exist.
+Prepare flags/indicators for interventions.
+Week 3 (DS #3 & Lead DS):
 
-- **Week 4** (DS #2 & DS #3):  
-  - **Initial Baseline Model (Attrition Prediction)**:  
-    - Train a simple baseline model (e.g., logistic regression or simple gradient boosting) to predict attrition.  
-    - Integrate intervention indicators as features.  
-  - **Continuous EDA**:  
-    - Use model residual analysis to refine data understanding. Identify patterns in clients the model misclassifies.  
-    - This EDA will guide feature refinement and possible event trigger adjustments.
+Lightweight EDA on Targets:
+Quickly verify the target variable distributions, attrition rates, and basic segmentations.
+Ensure data consistency and handle obvious missing values.
+Define Preliminary Triggers (Domain-Driven):
+Brainstorm with domain experts: what events are known or suspected triggers? Examples:
+Significant withdrawal event (e.g., >30% AUM in 2 weeks)
+Relationship Manager (RM) change event
+Fee increase or product price adjustment event
+Missed scheduled advisory meeting event
+Start coding these events as Boolean flags or counters in the dataset.
+Week 4 (DS #2 & DS #3):
 
-**Deliverables End of Month 1**:  
-- Well-defined attrition targets.  
-- Initial triggers identified from domain knowledge (event-based, not just data-driven).  
-- Baseline model and preliminary understanding of intervention bias.
+Initial Baseline Model (Attrition Prediction):
+Train a simple baseline model (e.g., logistic regression or simple gradient boosting) to predict attrition.
+Integrate intervention indicators as features.
+Continuous EDA:
+Use model residual analysis to refine data understanding. Identify patterns in clients the model misclassifies.
+This EDA will guide feature refinement and possible event trigger adjustments.
+Deliverables End of Month 1:
 
----
+Well-defined attrition targets.
+Initial triggers identified from domain knowledge (event-based, not just data-driven).
+Baseline model and preliminary understanding of intervention bias.
+Month 2: Refine Modeling, Introduce Causal/Uplift Methods, Event Trigger Validation
 
-**Month 2: Refine Modeling, Introduce Causal/Uplift Methods, Event Trigger Validation**
+Week 1-2 (Lead DS & DS #2):
 
-- **Week 1-2** (Lead DS & DS #2):  
-  - **Address Intervention Bias**:  
-    - Implement a two-stage modeling approach or uplift modeling:  
-      - First model: Probability of intervention given client characteristics (Propensity Model).  
-      - Second model: Adjust attrition predictions by factoring out intervention likelihood (Incorporate inverse probability weighting or uplift modeling techniques).  
-  - **Refine Triggers with Statistical Tests**:  
-    - For each candidate event-based trigger, measure how often it precedes attrition in the historical data.  
-    - Test trigger significance by comparing attrition rates in clients who experienced the event vs. a matched control who didn’t. This moves beyond raw feature importance and validates triggers as meaningful events.
+Address Intervention Bias:
+Implement a two-stage modeling approach or uplift modeling:
+First model: Probability of intervention given client characteristics (Propensity Model).
+Second model: Adjust attrition predictions by factoring out intervention likelihood (Incorporate inverse probability weighting or uplift modeling techniques).
+Refine Triggers with Statistical Tests:
+For each candidate event-based trigger, measure how often it precedes attrition in the historical data.
+Test trigger significance by comparing attrition rates in clients who experienced the event vs. a matched control who didn’t. This moves beyond raw feature importance and validates triggers as meaningful events.
+Week 3 (DS #3 & ML Engineer):
 
-- **Week 3** (DS #3 & ML Engineer):  
-  - **Iterative Model Improvement**:  
-    - Incorporate new features derived from triggers: for instance, “Number of large withdrawals in last 30 days” or “RM changes in last quarter.”  
-    - Retrain the model with adjusted datasets where intervention effects are partially neutralized.
-  - **Model Evaluation & Early Validation**:  
-    - Use AUC, Precision@TopDecile, and Recall as primary metrics.  
-    - Begin ranking clients and products by risk score and compare to baseline.
-  - **Continuous EDA**:  
-    - Deep-dive into clients flagged by triggers and those missed by the model.  
-    - Refine the event definitions if needed (e.g., adjusting the withdrawal percentage threshold).
+Iterative Model Improvement:
+Incorporate new features derived from triggers: for instance, “Number of large withdrawals in last 30 days” or “RM changes in last quarter.”
+Retrain the model with adjusted datasets where intervention effects are partially neutralized.
+Model Evaluation & Early Validation:
+Use AUC, Precision@TopDecile, and Recall as primary metrics.
+Begin ranking clients and products by risk score and compare to baseline.
+Continuous EDA:
+Deep-dive into clients flagged by triggers and those missed by the model.
+Refine the event definitions if needed (e.g., adjusting the withdrawal percentage threshold).
+Week 4 (Lead DS & DS #3):
 
-- **Week 4** (Lead DS & DS #3):  
-  - **Trigger Documentation & Rule Refinement**:  
-    - Clearly document each validated trigger as a rule:  
-      - “If a client experiences an RM change event followed by a large outflow within X days, increase churn risk score.”  
-    - Begin drafting how these triggers integrate as a retrieval mechanism: Identify clients meeting trigger conditions, then run the ranking model over them.
+Trigger Documentation & Rule Refinement:
+Clearly document each validated trigger as a rule:
+“If a client experiences an RM change event followed by a large outflow within X days, increase churn risk score.”
+Begin drafting how these triggers integrate as a retrieval mechanism: Identify clients meeting trigger conditions, then run the ranking model over them.
+Deliverables End of Month 2:
 
-**Deliverables End of Month 2**:  
-- A refined model that accounts for intervention bias using causal adjustments.  
-- A validated set of event-based triggers correlated with attrition.  
-- Improved model performance metrics and a set of trigger rules ready for integration.
+A refined model that accounts for intervention bias using causal adjustments.
+A validated set of event-based triggers correlated with attrition.
+Improved model performance metrics and a set of trigger rules ready for integration.
+Month 3: Integration of Triggers and Model, Final Validation, Pre-Deployment Planning
 
----
+Week 1-2 (DS #2 & ML Engineer):
 
-**Month 3: Integration of Triggers and Model, Final Validation, Pre-Deployment Planning**
+Integration of Retrieval (Triggers) + Ranking (Model):
+Implement a pipeline:
+Step 1 (Retrieval): Flag clients who hit any event-based triggers.
+Step 2 (Ranking): For all clients, including triggered ones, run the refined model to produce a churn probability and rank them.
+Back-Testing and Validation:
+Back-test the integrated approach on historical holdout data.
+Compare performance against the old retention system in terms of early detection and precision in identifying at-risk clients/products.
+Week 3 (Lead DS & DS #3):
 
-- **Week 1-2** (DS #2 & ML Engineer):  
-  - **Integration of Retrieval (Triggers) + Ranking (Model)**:  
-    - Implement a pipeline:  
-      - Step 1 (Retrieval): Flag clients who hit any event-based triggers.  
-      - Step 2 (Ranking): For all clients, including triggered ones, run the refined model to produce a churn probability and rank them.  
-  - **Back-Testing and Validation**:  
-    - Back-test the integrated approach on historical holdout data.  
-    - Compare performance against the old retention system in terms of early detection and precision in identifying at-risk clients/products.
+Final Model Tuning & Documentation:
+Fine-tune hyperparameters.
+Finalize the set of triggers and their definitions.
+Document the model pipeline, data sources, and assumptions made to address intervention bias.
+Continuous EDA:
+Validate final model outputs and triggers with relationship managers and product specialists.
+Check stability: Are triggers consistently meaningful over different time periods?
+Week 4 (All DS & ML Engineer):
 
-- **Week 3** (Lead DS & DS #3):  
-  - **Final Model Tuning & Documentation**:  
-    - Fine-tune hyperparameters.  
-    - Finalize the set of triggers and their definitions.  
-    - Document the model pipeline, data sources, and assumptions made to address intervention bias.
-  - **Continuous EDA**:  
-    - Validate final model outputs and triggers with relationship managers and product specialists.  
-    - Check stability: Are triggers consistently meaningful over different time periods?
+Pre-Deployment Planning:
+Outline API design and scoring pipelines.
+Ensure data flows and triggers can be updated regularly (weekly or monthly).
+Discuss monitoring strategies for post-deployment: model drift detection, ongoing intervention bias checks.
+Knowledge Transfer & Handover:
+Create clear documentation for stakeholders.
+Present final results to management, highlighting how intervention bias was mitigated and how triggers can inform proactive retention actions.
+Deliverables End of Month 3:
 
-- **Week 4** (All DS & ML Engineer):  
-  - **Pre-Deployment Planning**:  
-    - Outline API design and scoring pipelines.  
-    - Ensure data flows and triggers can be updated regularly (weekly or monthly).  
-    - Discuss monitoring strategies for post-deployment: model drift detection, ongoing intervention bias checks.
-  - **Knowledge Transfer & Handover**:  
-    - Create clear documentation for stakeholders.  
-    - Present final results to management, highlighting how intervention bias was mitigated and how triggers can inform proactive retention actions.
-
-**Deliverables End of Month 3**:  
-- Final integrated model (retrieval via triggers + ranking model).  
-- Detailed documentation of triggers as event-based rules.  
-- Pre-deployment plan and roadmap for production integration.
-
----
-
-### Roles & Responsibilities
-
-- **Lead Data Scientist (You)**:  
-  - Overall project management and strategic decisions.  
-  - Leading the approach to intervention bias adjustment and final validation steps.
-- **Data Scientist #2**:  
-  - Hands-on feature engineering, preliminary modeling, and uplift/causal modeling integration.  
-  - Validate triggers statistically and integrate them into the model.
-- **Data Scientist #3**:  
-  - Continuous targeted EDA throughout sprints.  
-  - Assist in refining triggers, conducting back-tests, and fine-tuning hyperparameters.
-- **Machine Learning Engineer**:  
-  - Ensure data processing pipelines are efficient.  
-  - Assist in model integration, building scoring pipelines, and setting up pre-deployment frameworks.
-
----
-
-### Conclusion
-
-This revised plan:  
-- Fits within the 3-month timeline before deployment.  
-- Integrates EDA continuously rather than front-loading it.  
-- Ensures triggers are genuine events, validated statistically, not just inferred from feature importance.  
-- Directly addresses intervention bias through causal and uplift modeling, and careful use of historical and control-like data segments.  
-- Keeps deployment readiness in mind throughout, without dedicating the entire period to it, ensuring a smooth handoff to production after the development phase.
+Final integrated model (retrieval via triggers + ranking model).
+Detailed documentation of triggers as event-based rules.
+Pre-deployment plan and roadmap for production integration.
+Roles & Responsibilities
+Lead Data Scientist (You):
+Overall project management and strategic decisions.
+Leading the approach to intervention bias adjustment and final validation steps.
+Data Scientist #2:
+Hands-on feature engineering, preliminary modeling, and uplift/causal modeling integration.
+Validate triggers statistically and integrate them into the model.
+Data Scientist #3:
+Continuous targeted EDA throughout sprints.
+Assist in refining triggers, conducting back-tests, and fine-tuning hyperparameters.
+Machine Learning Engineer:
+Ensure data processing pipelines are efficient.
+Assist in model integration, building scoring pipelines, and setting up pre-deployment frameworks.
