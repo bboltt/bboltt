@@ -1,31 +1,83 @@
 import optuna
-from pyspark.ml.classification import GBTClassifier
 
+# Objective function for Optuna
 def objective(trial):
-    params = {
-        'maxDepth': trial.suggest_int('maxDepth', 3, 10),
-        'maxBins': trial.suggest_categorical('maxBins', [64, 128, 256]),
-        'stepSize': trial.suggest_loguniform('stepSize', 0.01, 0.1),
-        'subsamplingRate': trial.suggest_float('subsamplingRate', 0.5, 1.0),
-        'minInstancesPerNode': trial.suggest_int('minInstancesPerNode', 10, 200)
-    }
+    max_depth = trial.suggest_int("maxDepth", 3, 10)
+    min_instances_per_node = trial.suggest_int("minInstancesPerNode", 10, 200)
+    step_size = trial.suggest_loguniform("stepSize", 0.01, 0.2)
+    max_bins = trial.suggest_categorical("maxBins", [64, 128, 256])
+    subsampling_rate = trial.suggest_float("subsamplingRate", 0.5, 1.0)
 
+    # Define the model with the suggested hyperparameters
     rf = GBTClassifier(
-        maxDepth=params['maxDepth'],
-        maxBins=params['maxBins'],
-        stepSize=params['stepSize'],
-        subsamplingRate=params['subsamplingRate'],
-        minInstancesPerNode=params['minInstancesPerNode'],
-        labelCol='label',
-        featuresCol='features',
-        predictionCol='prediction'
+        labelCol="label",
+        featuresCol="features",
+        predictionCol="prediction",
+        maxDepth=max_depth,
+        minInstancesPerNode=min_instances_per_node,
+        stepSize=step_size,
+        maxBins=max_bins,
+        subsamplingRate=subsampling_rate,
+        seed=22,
     )
 
-    rf_model = rf.fit(train_data)
-    predictions = rf_model.transform(test_data)
-    evaluator = BinaryClassificationEvaluator(labelCol='label', metricName='areaUnderROC')
-    return evaluator.evaluate(predictions)
+    # Train the model
+    rf_model = rf.fit(balance)
 
-study = optuna.create_study(direction='maximize')
+    # Evaluate performance on the test data
+    rf_pred_test = rf_model.transform(test_1)
+    evaluator = BinaryClassificationEvaluator(labelCol=target_column)
+    auc_roc_test = evaluator.evaluate(rf_pred_test, {evaluator.metricName: "areaUnderROC"})
+    
+    return auc_roc_test  # Maximize AUC_ROC on test data
+
+# Use Optuna for Bayesian Optimization
+study = optuna.create_study(direction="maximize")
 study.optimize(objective, n_trials=50)
-print(study.best_params)
+
+# Get the best parameters
+best_params = study.best_params
+print("Best Parameters:", best_params)
+
+
+
+# Train final model with best parameters
+final_rf = GBTClassifier(
+    labelCol="label",
+    featuresCol="features",
+    predictionCol="prediction",
+    maxDepth=best_params["maxDepth"],
+    minInstancesPerNode=best_params["minInstancesPerNode"],
+    stepSize=best_params["stepSize"],
+    maxBins=best_params["maxBins"],
+    subsamplingRate=best_params["subsamplingRate"],
+    seed=22,
+)
+
+rf_model = final_rf.fit(balance)
+
+# Evaluate final model on training and test sets
+rf_pred_train = rf_model.transform(train_1)
+rf_pred_test = rf_model.transform(test_1)
+
+evaluator = BinaryClassificationEvaluator(labelCol=target_column)
+
+# Metrics Collection
+metrics = {
+    "AUC_PR_Train": evaluator.evaluate(rf_pred_train, {evaluator.metricName: "areaUnderPR"}),
+    "AUC_ROC_Train": evaluator.evaluate(rf_pred_train, {evaluator.metricName: "areaUnderROC"}),
+    "AUC_PR_Test": evaluator.evaluate(rf_pred_test, {evaluator.metricName: "areaUnderPR"}),
+    "AUC_ROC_Test": evaluator.evaluate(rf_pred_test, {evaluator.metricName: "areaUnderROC"}),
+}
+
+# Save metrics to CSV
+agg_scor_dict = {
+    "AUC_PR_Train": [metrics["AUC_PR_Train"]],
+    "AUC_ROC_Train": [metrics["AUC_ROC_Train"]],
+    "AUC_PR_Test": [metrics["AUC_PR_Test"]],
+    "AUC_ROC_Test": [metrics["AUC_ROC_Test"]],
+}
+agg_scor_df = pd.DataFrame(agg_scor_dict)
+agg_scor_df.to_csv("metrics_output.csv", index=False)
+
+print("Metrics saved to metrics_output.csv")
