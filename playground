@@ -1,0 +1,31 @@
+import optuna
+from pyspark.ml.classification import GBTClassifier
+
+def objective(trial):
+    params = {
+        'maxDepth': trial.suggest_int('maxDepth', 3, 10),
+        'maxBins': trial.suggest_categorical('maxBins', [64, 128, 256]),
+        'stepSize': trial.suggest_loguniform('stepSize', 0.01, 0.1),
+        'subsamplingRate': trial.suggest_float('subsamplingRate', 0.5, 1.0),
+        'minInstancesPerNode': trial.suggest_int('minInstancesPerNode', 10, 200)
+    }
+
+    rf = GBTClassifier(
+        maxDepth=params['maxDepth'],
+        maxBins=params['maxBins'],
+        stepSize=params['stepSize'],
+        subsamplingRate=params['subsamplingRate'],
+        minInstancesPerNode=params['minInstancesPerNode'],
+        labelCol='label',
+        featuresCol='features',
+        predictionCol='prediction'
+    )
+
+    rf_model = rf.fit(train_data)
+    predictions = rf_model.transform(test_data)
+    evaluator = BinaryClassificationEvaluator(labelCol='label', metricName='areaUnderROC')
+    return evaluator.evaluate(predictions)
+
+study = optuna.create_study(direction='maximize')
+study.optimize(objective, n_trials=50)
+print(study.best_params)
