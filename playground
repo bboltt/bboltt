@@ -105,3 +105,51 @@ df_scores.to_csv("optuna_trials_metrics.csv", index=False)
 print("All trial metrics saved to optuna_trials_metrics.csv")
 
 
+
+
+# Get the best parameters from Optuna
+best_params = study.best_params
+print("Best Parameters Found:", best_params)
+
+# Train the best model using the best parameters
+best_model = GBTClassifier(
+    labelCol="label",
+    featuresCol="features",
+    predictionCol="prediction",
+    maxDepth=best_params["maxDepth"],
+    minInstancesPerNode=best_params["minInstancesPerNode"],
+    stepSize=best_params["stepSize"],
+    maxBins=best_params["maxBins"],
+    subsamplingRate=best_params["subsamplingRate"],
+    seed=22,
+)
+
+# Train the best model on the balanced training data
+rf_best_model = best_model.fit(balance)
+
+# Evaluate the best model on the train and test sets
+rf_pred_train = rf_best_model.transform(train_1)
+rf_pred_test = rf_best_model.transform(test_1)
+
+# Initialize evaluator
+evaluator = BinaryClassificationEvaluator(labelCol=target_column)
+
+# Calculate metrics for the best model
+best_model_metrics = {
+    "AUC_PR_Train": evaluator.evaluate(rf_pred_train, {evaluator.metricName: "areaUnderPR"}),
+    "AUC_ROC_Train": evaluator.evaluate(rf_pred_train, {evaluator.metricName: "areaUnderROC"}),
+    "AUC_PR_Test": evaluator.evaluate(rf_pred_test, {evaluator.metricName: "areaUnderPR"}),
+    "AUC_ROC_Test": evaluator.evaluate(rf_pred_test, {evaluator.metricName: "areaUnderROC"}),
+}
+
+# Print the best model metrics
+print("Best Model Metrics:")
+for key, value in best_model_metrics.items():
+    print(f"{key}: {value}")
+
+# Save the best model metrics to a CSV file
+pd.DataFrame([best_model_metrics]).to_csv("best_model_metrics.csv", index=False)
+print("Best model metrics saved to best_model_metrics.csv")
+
+
+
