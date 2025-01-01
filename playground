@@ -1,155 +1,66 @@
-import optuna
-from pyspark.ml.classification import GBTClassifier
-from pyspark.ml.evaluation import BinaryClassificationEvaluator
+from pyspark.sql.functions import col, weekofyear, year, count, sum, expr
 import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
 
-# Initialize the metrics dictionary (preserving your structure)
-agg_scor_dict = {
-    "AUC_PR_Train": [],
-    "AUC_PR_Test": [],
-    "AUC_ROC_Train": [],
-    "AUC_ROC_Test": [],
-    "maxDepth": [],
-    "min_instance": [],
-    "stepSize": [],
-    "maxBins": [],
-    "subSamplingRate": [],
-    "train_positive_true_tp": [],
-    "train_positive_pred_tp": [],
-    "train_neg_true_fp": [],
-    "train_positive_pred_fp": [],
-    "test_positive_true_tp": [],
-    "test_positive_pred_tp": [],
-    "test_neg_true_fp": [],
-    "test_positive_pred_fp": [],
-}
+# Set a consistent style for the plots
+sns.set_style("whitegrid")
+plt.rcParams.update({"font.size": 12})
 
-# Objective function for Optuna
-def objective(trial):
-    # Suggest hyperparameters
-    max_depth = trial.suggest_int("maxDepth", 3, 10)
-    min_instances_per_node = trial.suggest_int("minInstancesPerNode", 10, 200)
-    step_size = trial.suggest_loguniform("stepSize", 0.01, 0.2)
-    max_bins = trial.suggest_categorical("maxBins", [64, 128, 256])
-    subsampling_rate = trial.suggest_float("subsamplingRate", 0.5, 1.0)
+# Step 1: Add year-week column to the data
+master_table = master_table.withColumn("year_week", expr("concat(year(date), '-', weekofyear(date))"))
 
-    # Define the model with suggested hyperparameters
-    rf = GBTClassifier(
-        labelCol="label",
-        featuresCol="features",
-        predictionCol="prediction",
-        maxDepth=max_depth,
-        minInstancesPerNode=min_instances_per_node,
-        stepSize=step_size,
-        maxBins=max_bins,
-        subsamplingRate=subsampling_rate,
-        seed=22,
-    )
-
-    # Train the model
-    rf_model = rf.fit(balance)
-
-    # Predictions for train and test data
-    rf_pred_train = rf_model.transform(train_1)
-    rf_pred_test = rf_model.transform(test_1)
-
-    # Initialize evaluator
-    evaluator = BinaryClassificationEvaluator(labelCol=target_column)
-
-    # Calculate metrics
-    auc_pr_train = evaluator.evaluate(rf_pred_train, {evaluator.metricName: "areaUnderPR"})
-    auc_roc_train = evaluator.evaluate(rf_pred_train, {evaluator.metricName: "areaUnderROC"})
-    auc_pr_test = evaluator.evaluate(rf_pred_test, {evaluator.metricName: "areaUnderPR"})
-    auc_roc_test = evaluator.evaluate(rf_pred_test, {evaluator.metricName: "areaUnderROC"})
-
-    # Additional metrics (true positive, false positive, etc.)
-    train_positive_true_tp = rf_pred_train.filter((rf_pred_train["label"] == 1) & (rf_pred_train["prediction"] == 1)).count()
-    train_positive_pred_tp = rf_pred_train.filter(rf_pred_train["prediction"] == 1).count()
-    train_neg_true_fp = rf_pred_train.filter((rf_pred_train["label"] == 0) & (rf_pred_train["prediction"] == 1)).count()
-    train_positive_pred_fp = rf_pred_train.filter((rf_pred_train["label"] == 1) & (rf_pred_train["prediction"] == 0)).count()
-
-    test_positive_true_tp = rf_pred_test.filter((rf_pred_test["label"] == 1) & (rf_pred_test["prediction"] == 1)).count()
-    test_positive_pred_tp = rf_pred_test.filter(rf_pred_test["prediction"] == 1).count()
-    test_neg_true_fp = rf_pred_test.filter((rf_pred_test["label"] == 0) & (rf_pred_test["prediction"] == 1)).count()
-    test_positive_pred_fp = rf_pred_test.filter((rf_pred_test["label"] == 1) & (rf_pred_test["prediction"] == 0)).count()
-
-    # Append metrics for this trial
-    agg_scor_dict["AUC_PR_Train"].append(auc_pr_train)
-    agg_scor_dict["AUC_PR_Test"].append(auc_pr_test)
-    agg_scor_dict["AUC_ROC_Train"].append(auc_roc_train)
-    agg_scor_dict["AUC_ROC_Test"].append(auc_roc_test)
-    agg_scor_dict["maxDepth"].append(max_depth)
-    agg_scor_dict["min_instance"].append(min_instances_per_node)
-    agg_scor_dict["stepSize"].append(step_size)
-    agg_scor_dict["maxBins"].append(max_bins)
-    agg_scor_dict["subSamplingRate"].append(subsampling_rate)
-    agg_scor_dict["train_positive_true_tp"].append(train_positive_true_tp)
-    agg_scor_dict["train_positive_pred_tp"].append(train_positive_pred_tp)
-    agg_scor_dict["train_neg_true_fp"].append(train_neg_true_fp)
-    agg_scor_dict["train_positive_pred_fp"].append(train_positive_pred_fp)
-    agg_scor_dict["test_positive_true_tp"].append(test_positive_true_tp)
-    agg_scor_dict["test_positive_pred_tp"].append(test_positive_pred_tp)
-    agg_scor_dict["test_neg_true_fp"].append(test_neg_true_fp)
-    agg_scor_dict["test_positive_pred_fp"].append(test_positive_pred_fp)
-
-    # Return the AUC_ROC on test data as the metric to maximize
-    return auc_roc_test
-
-# Perform Bayesian Optimization
-study = optuna.create_study(direction="maximize")
-study.optimize(objective, n_trials=50)
-
-# Save all trial results to CSV
-df_scores = pd.DataFrame(agg_scor_dict)
-df_scores.to_csv("optuna_trials_metrics.csv", index=False)
-print("All trial metrics saved to optuna_trials_metrics.csv")
-
-
-
-
-# Get the best parameters from Optuna
-best_params = study.best_params
-print("Best Parameters Found:", best_params)
-
-# Train the best model using the best parameters
-best_model = GBTClassifier(
-    labelCol="label",
-    featuresCol="features",
-    predictionCol="prediction",
-    maxDepth=best_params["maxDepth"],
-    minInstancesPerNode=best_params["minInstancesPerNode"],
-    stepSize=best_params["stepSize"],
-    maxBins=best_params["maxBins"],
-    subsamplingRate=best_params["subsamplingRate"],
-    seed=22,
+# Step 2: Aggregate data to weekly level
+weekly_summary = master_table.groupBy("year_week").agg(
+    count("*").alias("transaction_count"),
+    sum(col("label")).alias("fraud_count")  # Sum of label=1 gives fraud count
 )
 
-# Train the best model on the balanced training data
-rf_best_model = best_model.fit(balance)
+# Calculate fraud rate
+weekly_summary = weekly_summary.withColumn(
+    "fraud_rate", (col("fraud_count") / col("transaction_count")) * 100
+)
 
-# Evaluate the best model on the train and test sets
-rf_pred_train = rf_best_model.transform(train_1)
-rf_pred_test = rf_best_model.transform(test_1)
+# Step 3: Split data into training and test
+train_data = weekly_summary.filter((col("date") >= train_start_date) & (col("date") <= train_end_date))
+test_data = weekly_summary.filter((col("date") >= test_start_date) & (col("date") <= test_end_date))
 
-# Initialize evaluator
-evaluator = BinaryClassificationEvaluator(labelCol=target_column)
+# Step 4: Convert to Pandas for visualization
+train_df = train_data.toPandas()
+test_df = test_data.toPandas()
 
-# Calculate metrics for the best model
-best_model_metrics = {
-    "AUC_PR_Train": evaluator.evaluate(rf_pred_train, {evaluator.metricName: "areaUnderPR"}),
-    "AUC_ROC_Train": evaluator.evaluate(rf_pred_train, {evaluator.metricName: "areaUnderROC"}),
-    "AUC_PR_Test": evaluator.evaluate(rf_pred_test, {evaluator.metricName: "areaUnderPR"}),
-    "AUC_ROC_Test": evaluator.evaluate(rf_pred_test, {evaluator.metricName: "areaUnderROC"}),
-}
+# Step 5: Enhanced Visualization
+fig, axes = plt.subplots(3, 1, figsize=(16, 12), sharex=True)
 
-# Print the best model metrics
-print("Best Model Metrics:")
-for key, value in best_model_metrics.items():
-    print(f"{key}: {value}")
+# Plot 1: Transaction Count
+sns.lineplot(data=train_df, x="year_week", y="transaction_count", label="Train Transactions", marker="o", ax=axes[0])
+sns.lineplot(data=test_df, x="year_week", y="transaction_count", label="Test Transactions", marker="o", ax=axes[0])
+axes[0].set_title("Weekly Transaction Count")
+axes[0].set_ylabel("Transaction Count")
+axes[0].legend()
+axes[0].tick_params(axis="x", rotation=45)
 
-# Save the best model metrics to a CSV file
-pd.DataFrame([best_model_metrics]).to_csv("best_model_metrics.csv", index=False)
-print("Best model metrics saved to best_model_metrics.csv")
+# Plot 2: Fraud Count
+sns.lineplot(data=train_df, x="year_week", y="fraud_count", label="Train Fraud Count", marker="o", ax=axes[1])
+sns.lineplot(data=test_df, x="year_week", y="fraud_count", label="Test Fraud Count", marker="o", ax=axes[1])
+axes[1].set_title("Weekly Fraud Count")
+axes[1].set_ylabel("Fraud Count")
+axes[1].legend()
+axes[1].tick_params(axis="x", rotation=45)
+
+# Plot 3: Fraud Rate
+sns.lineplot(data=train_df, x="year_week", y="fraud_rate", label="Train Fraud Rate", marker="o", ax=axes[2])
+sns.lineplot(data=test_df, x="year_week", y="fraud_rate", label="Test Fraud Rate", marker="o", ax=axes[2])
+axes[2].set_title("Weekly Fraud Rate (%)")
+axes[2].set_ylabel("Fraud Rate (%)")
+axes[2].legend()
+axes[2].tick_params(axis="x", rotation=45)
+
+# Add a common x-label
+plt.xlabel("Year-Week", fontsize=14)
+plt.tight_layout()
+plt.show()
+
 
 
 
