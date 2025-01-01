@@ -1,6 +1,23 @@
 import optuna
+from pyspark.ml.classification import GBTClassifier
+from pyspark.ml.evaluation import BinaryClassificationEvaluator
+import pandas as pd
 
-# Objective function for Bayesian Optimization
+# Dictionary to store metrics for each trial
+trial_metrics = {
+    "Trial_Number": [],
+    "MaxDepth": [],
+    "MinInstancesPerNode": [],
+    "StepSize": [],
+    "MaxBins": [],
+    "SubsamplingRate": [],
+    "AUC_PR_Train": [],
+    "AUC_ROC_Train": [],
+    "AUC_PR_Test": [],
+    "AUC_ROC_Test": []
+}
+
+# Define the objective function for Optuna
 def objective(trial):
     # Suggest hyperparameters
     max_depth = trial.suggest_int("maxDepth", 3, 10)
@@ -25,22 +42,43 @@ def objective(trial):
     # Train the model
     rf_model = rf.fit(balance)
 
-    # Evaluate on test data
+    # Evaluate on training data
+    rf_pred_train = rf_model.transform(train_1)
     rf_pred_test = rf_model.transform(test_1)
     evaluator = BinaryClassificationEvaluator(labelCol=target_column)
+
+    # Calculate metrics
+    auc_pr_train = evaluator.evaluate(rf_pred_train, {evaluator.metricName: "areaUnderPR"})
+    auc_roc_train = evaluator.evaluate(rf_pred_train, {evaluator.metricName: "areaUnderROC"})
+    auc_pr_test = evaluator.evaluate(rf_pred_test, {evaluator.metricName: "areaUnderPR"})
     auc_roc_test = evaluator.evaluate(rf_pred_test, {evaluator.metricName: "areaUnderROC"})
 
-    return auc_roc_test  # Maximize AUC_ROC on test data
+    # Log metrics for this trial
+    trial_metrics["Trial_Number"].append(trial.number)
+    trial_metrics["MaxDepth"].append(max_depth)
+    trial_metrics["MinInstancesPerNode"].append(min_instances_per_node)
+    trial_metrics["StepSize"].append(step_size)
+    trial_metrics["MaxBins"].append(max_bins)
+    trial_metrics["SubsamplingRate"].append(subsampling_rate)
+    trial_metrics["AUC_PR_Train"].append(auc_pr_train)
+    trial_metrics["AUC_ROC_Train"].append(auc_roc_train)
+    trial_metrics["AUC_PR_Test"].append(auc_pr_test)
+    trial_metrics["AUC_ROC_Test"].append(auc_roc_test)
+
+    # Return the AUC_ROC on test data as the metric to maximize
+    return auc_roc_test
 
 # Perform Bayesian Optimization
 study = optuna.create_study(direction="maximize")
 study.optimize(objective, n_trials=50)
 
-# Get the best hyperparameters
-best_params = study.best_params
-print("Best Parameters:", best_params)
+# Save all trial results to CSV
+df_trials = pd.DataFrame(trial_metrics)
+df_trials.to_csv("optuna_trials_metrics.csv", index=False)
+print("All trial metrics saved to optuna_trials_metrics.csv")
 
-# Train final model with the best hyperparameters
+# Train final model with the best parameters
+best_params = study.best_params
 final_rf = GBTClassifier(
     labelCol="label",
     featuresCol="features",
@@ -58,21 +96,19 @@ rf_model = final_rf.fit(balance)
 # Evaluate final model on training and test sets
 rf_pred_train = rf_model.transform(train_1)
 rf_pred_test = rf_model.transform(test_1)
-evaluator = BinaryClassificationEvaluator(labelCol=target_column)
 
-# Append metrics
-agg_scor_dict["AUC_PR_Train"].append(evaluator.evaluate(rf_pred_train, {evaluator.metricName: "areaUnderPR"}))
-agg_scor_dict["AUC_PR_Test"].append(evaluator.evaluate(rf_pred_test, {evaluator.metricName: "areaUnderPR"}))
-agg_scor_dict["AUC_ROC_Train"].append(evaluator.evaluate(rf_pred_train, {evaluator.metricName: "areaUnderROC"}))
-agg_scor_dict["AUC_ROC_Test"].append(evaluator.evaluate(rf_pred_test, {evaluator.metricName: "areaUnderROC"}))
+# Collect metrics for the final model
+final_metrics = {
+    "AUC_PR_Train": evaluator.evaluate(rf_pred_train, {evaluator.metricName: "areaUnderPR"}),
+    "AUC_ROC_Train": evaluator.evaluate(rf_pred_train, {evaluator.metricName: "areaUnderROC"}),
+    "AUC_PR_Test": evaluator.evaluate(rf_pred_test, {evaluator.metricName: "areaUnderPR"}),
+    "AUC_ROC_Test": evaluator.evaluate(rf_pred_test, {evaluator.metricName: "areaUnderROC"})
+}
 
-# Print metrics
-for c in agg_scor_dict:
-    print(c, agg_scor_dict[c][-1])
+print("Final Model Metrics:", final_metrics)
 
-# Save metrics to CSV
-rf_pred.unpersist()
-df_scores = pd.DataFrame(agg_scor_dict).T
-df_scores.to_csv("metrics_output.csv", index=False)
-print("Metrics saved to metrics_output.csv")
+# Save final model metrics to CSV
+pd.DataFrame([final_metrics]).to_csv("final_model_metrics.csv", index=False)
+print("Final model metrics saved to final_model_metrics.csv")
+
 
