@@ -1,54 +1,57 @@
-import optuna
-from pyspark.ml.classification import GBTClassifier
-from pyspark.ml.evaluation import BinaryClassificationEvaluator
-
-# Objective function for Optuna with early stopping
 def objective(trial):
-    # Define hyperparameter space
-    max_depth = trial.suggest_int("maxDepth", 3, 10)
+    # Define the hyperparameter search space
+    max_depth = trial.suggest_int("maxDepth", 3, 30)
     min_instances_per_node = trial.suggest_int("minInstancesPerNode", 10, 200)
     step_size = trial.suggest_loguniform("stepSize", 0.01, 0.2)
     max_bins = trial.suggest_categorical("maxBins", [64, 128, 256])
     subsampling_rate = trial.suggest_float("subsamplingRate", 0.5, 1.0)
 
-    # Define the GBTClassifier
+    # Initialize the GBTClassifier with suggested hyperparameters
     rf = GBTClassifier(
         labelCol="label",
         featuresCol="features",
+        predictionCol="prediction",
         maxDepth=max_depth,
         minInstancesPerNode=min_instances_per_node,
         stepSize=step_size,
         maxBins=max_bins,
         subsamplingRate=subsampling_rate,
-        seed=22
+        seed=22,
+        maxIter=250  # Maximum number of iterations (trees)
     )
 
     # Early stopping variables
-    max_iter = 100  # Maximum number of iterations (trees)
-    patience = 5    # Number of iterations without improvement before stopping
     best_auc = 0.0
     no_improvement_counter = 0
+    patience = 5  # Number of iterations with no improvement before stopping
 
-    for iter_step in range(1, max_iter + 1):
-        # Train the model incrementally
-        rf.setMaxIter(iter_step)  # Set the number of iterations
-        rf_model = rf.fit(train_data)
+    for iter_step in range(1, 251):  # Incrementally train for up to maxIter
+        rf.setMaxIter(iter_step)  # Set the current number of iterations
+        rf_model = rf.fit(balance)  # Train the model
 
-        # Evaluate on the validation set
-        rf_pred_val = rf_model.transform(val_data)
-        evaluator = BinaryClassificationEvaluator(labelCol="label", metricName="areaUnderROC")
-        auc_val = evaluator.evaluate(rf_pred_val)
+        # Predictions for train and test data
+        rf_pred_train = rf_model.transform(train_1)
+        rf_pred_test = rf_model.transform(test_1)
 
-        # Report the intermediate result to Optuna
-        trial.report(auc_val, step=iter_step)
+        # Initialize evaluator
+        evaluator = BinaryClassificationEvaluator(labelCol=target_column)
 
-        # Check if trial should be pruned
+        # Calculate metrics
+        auc_pr_train = evaluator.evaluate(rf_pred_train, {evaluator.metricName: "areaUnderPR"})
+        auc_roc_train = evaluator.evaluate(rf_pred_train, {evaluator.metricName: "areaUnderROC"})
+        auc_pr_test = evaluator.evaluate(rf_pred_test, {evaluator.metricName: "areaUnderPR"})
+        auc_roc_test = evaluator.evaluate(rf_pred_test, {evaluator.metricName: "areaUnderROC"})
+
+        # Report intermediate results to Optuna
+        trial.report(auc_roc_test, step=iter_step)
+
+        # Check for pruning
         if trial.should_prune():
             raise optuna.exceptions.TrialPruned()
 
         # Early stopping logic
-        if auc_val > best_auc:
-            best_auc = auc_val
+        if auc_roc_test > best_auc:
+            best_auc = auc_roc_test
             no_improvement_counter = 0
         else:
             no_improvement_counter += 1
@@ -57,16 +60,38 @@ def objective(trial):
             print(f"Early stopping triggered at iteration {iter_step}")
             break
 
-    # Return the best AUC score achieved
+    # Calculate additional metrics for the trial
+    train_positive_true_tp = rf_pred_train.filter((rf_pred_train["label"] == 1) & (rf_pred_train["prediction"] == 1)).count()
+    train_positive_pred_tp = rf_pred_train.filter(rf_pred_train["prediction"] == 1).count()
+    train_neg_true_fp = rf_pred_train.filter((rf_pred_train["label"] == 0) & (rf_pred_train["prediction"] == 1)).count()
+    train_positive_pred_fp = rf_pred_train.filter((rf_pred_train["label"] == 1) & (rf_pred_train["prediction"] == 0)).count()
+
+    test_positive_true_tp = rf_pred_test.filter((rf_pred_test["label"] == 1) & (rf_pred_test["prediction"] == 1)).count()
+    test_positive_pred_tp = rf_pred_test.filter(rf_pred_test["prediction"] == 1).count()
+    test_neg_true_fp = rf_pred_test.filter((rf_pred_test["label"] == 0) & (rf_pred_test["prediction"] == 1)).count()
+    test_positive_pred_fp = rf_pred_test.filter((rf_pred_test["label"] == 1) & (rf_pred_test["prediction"] == 0)).count()
+
+    # Append metrics for this trial
+    agg_scor_dict["AUC_PR_Train"].append(auc_pr_train)
+    agg_scor_dict["AUC_PR_Test"].append(auc_pr_test)
+    agg_scor_dict["AUC_ROC_Train"].append(auc_roc_train)
+    agg_scor_dict["AUC_ROC_Test"].append(auc_roc_test)
+    agg_scor_dict["maxDepth"].append(max_depth)
+    agg_scor_dict["min_instance"].append(min_instances_per_node)
+    agg_scor_dict["stepSize"].append(step_size)
+    agg_scor_dict["maxBins"].append(max_bins)
+    agg_scor_dict["subSamplingRate"].append(subsampling_rate)
+    agg_scor_dict["train_positive_true_tp"].append(train_positive_true_tp)
+    agg_scor_dict["train_positive_pred_tp"].append(train_positive_pred_tp)
+    agg_scor_dict["train_neg_true_fp"].append(train_neg_true_fp)
+    agg_scor_dict["train_positive_pred_fp"].append(train_positive_pred_fp)
+    agg_scor_dict["test_positive_true_tp"].append(test_positive_true_tp)
+    agg_scor_dict["test_positive_pred_tp"].append(test_positive_pred_tp)
+    agg_scor_dict["test_neg_true_fp"].append(test_neg_true_fp)
+    agg_scor_dict["test_positive_pred_fp"].append(test_positive_pred_fp)
+
+    # Return the best AUC_ROC on test data as the metric to maximize
     return best_auc
-
-# Define Optuna study with a pruner
-study = optuna.create_study(direction="maximize", pruner=optuna.pruners.MedianPruner())
-study.optimize(objective, n_trials=50)
-
-# Best trial
-print("Best trial:")
-print(study.best_trial)
 
 
 
