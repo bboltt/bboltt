@@ -1,65 +1,72 @@
-from pyspark.sql.functions import col, weekofyear, year, count, sum, expr
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
+import optuna
+from pyspark.ml.classification import GBTClassifier
+from pyspark.ml.evaluation import BinaryClassificationEvaluator
 
-# Set a consistent style for the plots
-sns.set_style("whitegrid")
-plt.rcParams.update({"font.size": 12})
+# Objective function for Optuna with early stopping
+def objective(trial):
+    # Define hyperparameter space
+    max_depth = trial.suggest_int("maxDepth", 3, 10)
+    min_instances_per_node = trial.suggest_int("minInstancesPerNode", 10, 200)
+    step_size = trial.suggest_loguniform("stepSize", 0.01, 0.2)
+    max_bins = trial.suggest_categorical("maxBins", [64, 128, 256])
+    subsampling_rate = trial.suggest_float("subsamplingRate", 0.5, 1.0)
 
-# Step 1: Add year-week column to the data
-master_table = master_table.withColumn("year_week", expr("concat(year(date), '-', weekofyear(date))"))
+    # Define the GBTClassifier
+    rf = GBTClassifier(
+        labelCol="label",
+        featuresCol="features",
+        maxDepth=max_depth,
+        minInstancesPerNode=min_instances_per_node,
+        stepSize=step_size,
+        maxBins=max_bins,
+        subsamplingRate=subsampling_rate,
+        seed=22
+    )
 
-# Step 2: Aggregate data to weekly level
-weekly_summary = master_table.groupBy("year_week").agg(
-    count("*").alias("transaction_count"),
-    sum(col("label")).alias("fraud_count")  # Sum of label=1 gives fraud count
-)
+    # Early stopping variables
+    max_iter = 100  # Maximum number of iterations (trees)
+    patience = 5    # Number of iterations without improvement before stopping
+    best_auc = 0.0
+    no_improvement_counter = 0
 
-# Calculate fraud rate
-weekly_summary = weekly_summary.withColumn(
-    "fraud_rate", (col("fraud_count") / col("transaction_count")) * 100
-)
+    for iter_step in range(1, max_iter + 1):
+        # Train the model incrementally
+        rf.setMaxIter(iter_step)  # Set the number of iterations
+        rf_model = rf.fit(train_data)
 
-# Step 3: Split data into training and test
-train_data = weekly_summary.filter((col("date") >= train_start_date) & (col("date") <= train_end_date))
-test_data = weekly_summary.filter((col("date") >= test_start_date) & (col("date") <= test_end_date))
+        # Evaluate on the validation set
+        rf_pred_val = rf_model.transform(val_data)
+        evaluator = BinaryClassificationEvaluator(labelCol="label", metricName="areaUnderROC")
+        auc_val = evaluator.evaluate(rf_pred_val)
 
-# Step 4: Convert to Pandas for visualization
-train_df = train_data.toPandas()
-test_df = test_data.toPandas()
+        # Report the intermediate result to Optuna
+        trial.report(auc_val, step=iter_step)
 
-# Step 5: Enhanced Visualization
-fig, axes = plt.subplots(3, 1, figsize=(16, 12), sharex=True)
+        # Check if trial should be pruned
+        if trial.should_prune():
+            raise optuna.exceptions.TrialPruned()
 
-# Plot 1: Transaction Count
-sns.lineplot(data=train_df, x="year_week", y="transaction_count", label="Train Transactions", marker="o", ax=axes[0])
-sns.lineplot(data=test_df, x="year_week", y="transaction_count", label="Test Transactions", marker="o", ax=axes[0])
-axes[0].set_title("Weekly Transaction Count")
-axes[0].set_ylabel("Transaction Count")
-axes[0].legend()
-axes[0].tick_params(axis="x", rotation=45)
+        # Early stopping logic
+        if auc_val > best_auc:
+            best_auc = auc_val
+            no_improvement_counter = 0
+        else:
+            no_improvement_counter += 1
 
-# Plot 2: Fraud Count
-sns.lineplot(data=train_df, x="year_week", y="fraud_count", label="Train Fraud Count", marker="o", ax=axes[1])
-sns.lineplot(data=test_df, x="year_week", y="fraud_count", label="Test Fraud Count", marker="o", ax=axes[1])
-axes[1].set_title("Weekly Fraud Count")
-axes[1].set_ylabel("Fraud Count")
-axes[1].legend()
-axes[1].tick_params(axis="x", rotation=45)
+        if no_improvement_counter >= patience:
+            print(f"Early stopping triggered at iteration {iter_step}")
+            break
 
-# Plot 3: Fraud Rate
-sns.lineplot(data=train_df, x="year_week", y="fraud_rate", label="Train Fraud Rate", marker="o", ax=axes[2])
-sns.lineplot(data=test_df, x="year_week", y="fraud_rate", label="Test Fraud Rate", marker="o", ax=axes[2])
-axes[2].set_title("Weekly Fraud Rate (%)")
-axes[2].set_ylabel("Fraud Rate (%)")
-axes[2].legend()
-axes[2].tick_params(axis="x", rotation=45)
+    # Return the best AUC score achieved
+    return best_auc
 
-# Add a common x-label
-plt.xlabel("Year-Week", fontsize=14)
-plt.tight_layout()
-plt.show()
+# Define Optuna study with a pruner
+study = optuna.create_study(direction="maximize", pruner=optuna.pruners.MedianPruner())
+study.optimize(objective, n_trials=50)
+
+# Best trial
+print("Best trial:")
+print(study.best_trial)
 
 
 
