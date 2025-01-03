@@ -1,29 +1,28 @@
-from pyspark.sql.functions import col, countDistinct, to_date, datediff
+from pyspark.sql.functions import col, countDistinct, to_date, datediff, when
 
 # Add a column for the difference in days between open_date and business_date
 df = df.withColumn("days_diff", datediff(to_date(col("business_date")), to_date(col("open_date"))))
 
-# Create separate filters for each time window and count distinct ip_id
+# Add intermediate columns for each time window
+df = df.withColumn("ip_in_1m", when((col("days_diff") <= 30) & (col("days_diff") >= 0), col("ip_id")))
+df = df.withColumn("ip_in_2m", when((col("days_diff") <= 60) & (col("days_diff") >= 0), col("ip_id")))
+df = df.withColumn("ip_in_6m", when((col("days_diff") <= 180) & (col("days_diff") >= 0), col("ip_id")))
+df = df.withColumn("ip_in_12m", when((col("days_diff") <= 365) & (col("days_diff") >= 0), col("ip_id")))
+
+# Group by segmt_prod_type and count distinct ip_id for each time window
 result_df = (
     df.groupBy("segmt_prod_type")
     .agg(
-        countDistinct(
-            col("ip_id").when((col("days_diff") <= 30) & (col("days_diff") >= 0), col("ip_id"))
-        ).alias("distinct_ip_count_1m"),
-        countDistinct(
-            col("ip_id").when((col("days_diff") <= 60) & (col("days_diff") >= 0), col("ip_id"))
-        ).alias("distinct_ip_count_2m"),
-        countDistinct(
-            col("ip_id").when((col("days_diff") <= 180) & (col("days_diff") >= 0), col("ip_id"))
-        ).alias("distinct_ip_count_6m"),
-        countDistinct(
-            col("ip_id").when((col("days_diff") <= 365) & (col("days_diff") >= 0), col("ip_id"))
-        ).alias("distinct_ip_count_12m")
+        countDistinct("ip_in_1m").alias("distinct_ip_count_1m"),
+        countDistinct("ip_in_2m").alias("distinct_ip_count_2m"),
+        countDistinct("ip_in_6m").alias("distinct_ip_count_6m"),
+        countDistinct("ip_in_12m").alias("distinct_ip_count_12m")
     )
 )
 
 # Show the result
 result_df.show()
+
 
 
 
