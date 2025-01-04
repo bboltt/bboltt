@@ -26,15 +26,152 @@ result_df.show()
 
 
 
-def objective(trial):
-    # Define the hyperparameter search space
-    max_depth = trial.suggest_int("maxDepth", 3, 30)
-    min_instances_per_node = trial.suggest_int("minInstancesPerNode", 10, 200)
-    step_size = trial.suggest_loguniform("stepSize", 0.01, 0.2)
-    max_bins = trial.suggest_categorical("maxBins", [64, 128, 256])
-    subsampling_rate = trial.suggest_float("subsamplingRate", 0.5, 1.0)
+import numpy as np
+import pandas as pd
+from collections import defaultdict
+from apply_hive_table import apply_hive
+from modelconftranslator.Config import get_config
+from modelconftranslator.DataIO import (set_data_config, write_hive_table_external)
+from itertools import chain
+from pyspark.ml import Pipeline
+from pyspark.ml import PipelineModel
+from pyspark.ml.tuning import (
+    ParamGridBuilder,
+    TrainValidationSplit,
+)
+from pyspark.ml.feature import (
+    ChiSqSelector,
+    Tokenizer,
+    QuantileDiscretizer,
+)
+from pyspark.ml.classification import (
+    RandomForestClassifier,
+    RandomForestClassificationModel,
+    GBTClassifier,
+)
+from pyspark.ml.linalg import (
+    DenseVector,
+    SparseVector,
+    Vector,
+    VectorUDT,
+)
+from pyspark.ml.feature import (
+    VectorAssembler,
+    StringIndexer,
+    OneHotEncoder,
+)
+import inclearing as inclearing
+from pyspark.ml.evaluation import BinaryClassificationEvaluator
+from pyspark.mllib.stat import Statistics
+from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
+from pyspark.sql.functions import isnan, when, count, col, explode, udf
+from pyspark.sql.types import *
+from typing import Dict, Any
+from inclearing.dev_data.feature import Features_NUM, Target, Identifier, Feat_NUM_50, Feat_NUM_50_RETRAIN
 
-    # Initialize the GBTClassifier with suggested hyperparameters
+from optimal_spark_config.create_spark_instance import (
+    generate_spark_instance,
+)
+
+import optuna
+
+#def main():
+spark = generate_spark_instance(total_memory=400, total_vcpu=200)
+
+#=======================================#
+DEV_trans = (
+    spark.table("dm_fraud_detection.inc_frd_train_mtkpop_v5_imputed")
+    .filter(col('ods_business_dt').between('2024-04-22', '2024-10-04'))
+    .fillna(-999, subset=Feat_NUM_50_RETRAIN)
+    .select(
+        *Identifier, 
+        *Feat_NUM_50_RETRAIN,
+        *Target, 'train_set'
+    )
+)
+
+target_column = "label"
+
+assemblerNum = VectorAssembler(inputCols=Feat_NUM_50_RETRAIN, outputCol="features")
+pipe_assem = Pipeline(stages=[assemblerNum])
+DEV_1 = pipe_assem.fit(DEV_trans)
+DEV_vec = DEV_1.transform(DEV_trans)
+
+train_1 = DEV_vec.filter(col('train_set')==1)
+test_1 = DEV_vec.filter(col('train_set')==0)
+
+def handle_imbalanced_data(train, factor, target_column, imbalanced_value):
+    import numpy as np
+    from pyspark.sql.functions import udf, explode
+    from pyspark.sql.types import FloatType, ArrayType
+
+    num_rep = int(
+        np.round(
+            train.count()
+            / train.filter(train[target_column] == imbalanced_value).count() * factor
+        )
+    )
+    n_to_array = udf(
+        lambda x: [0.0] * num_rep if x == 1.0 else [0.0], 
+        ArrayType(FloatType())
+    )
+    train = train.withColumn("n", n_to_array(train[target_column]))
+    train = train.withColumn("n", explode(train.n))
+    return train.drop("n")
+
+# Balancing the event-nonevent records in the training sample
+balance = handle_imbalanced_data(train_1, 0.5, target_column, imbalanced_value=1)
+
+# -- CHANGED: Cache data so Spark doesn't re-read or re-transform repeatedly.
+balance = balance.cache()
+balance.count()  # materialize the cache
+
+train_1 = train_1.cache()
+train_1.count()
+test_1 = test_1.cache()
+test_1.count()
+
+# Storage dict for trial metrics
+agg_scor_dict = {
+    "AUC_PR_Train": [0.0],
+    "AUC_PR_Test": [0.0],
+    "AUC_ROC_Train": [0.0],
+    "AUC_ROC_Test": [0.0],
+    "maxDepth": [0.0],
+    "min_instance": [0.0],
+    "stepSize": [0.0],
+    "maxBins": [0.0],
+    "subSamplingRate":[0.0],
+    # -- CHANGED: Add maxIter so we can store it each trial
+    "maxIter": [0.0],  
+    "train_positive_true_tp": [0.0],
+    "train_positive_pred_tp": [0.0],
+    "train_neg_true_fp": [0.0],
+    "train_positive_pred_fp": [0.0],
+    "test_positive_true_tp": [0.0],
+    "test_positive_pred_tp": [0.0],
+    "test_neg_true_fp": [0.0],
+    "test_positive_pred_fp": [0.0]
+}
+
+param_cols = ['maxDepth', 'minInstancesPerNode', 'stepSize', 'maxBins', 'subsamplingRate', 'maxIter']
+score_cols = ['AUC_PR_Train', 'AUC_PR_Test', 'AUC_ROC_Train', 'AUC_ROC_Test']
+
+#=========================================================================================
+# Objective function for Optuna
+#=========================================================================================
+def objective(trial):
+    # Hyperparameter search space
+    max_depth = trial.suggest_int("maxDepth", 3, 8)
+    min_instances_per_node = trial.suggest_int("minInstancesPerNode", 10, 30)
+    step_size = trial.suggest_loguniform("stepSize", 0.2, 0.4)
+    max_bins = trial.suggest_categorical("maxBins", [64])
+    subsampling_rate = trial.suggest_float("subsamplingRate", 0.8, 1.0)
+    # -- CHANGED: Instead of an incremental loop, we treat maxIter as a single hyperparam
+    max_iter = trial.suggest_int("maxIter", 50, 250, step=50)
+
+    # -- CHANGED: Train exactly once with the chosen maxIter
     rf = GBTClassifier(
         labelCol="label",
         featuresCol="features",
@@ -45,61 +182,54 @@ def objective(trial):
         maxBins=max_bins,
         subsamplingRate=subsampling_rate,
         seed=22,
-        maxIter=250  # Maximum number of iterations (trees)
+        maxIter=max_iter
     )
 
-    # Early stopping variables
-    best_auc = 0.0
-    no_improvement_counter = 0
-    patience = 5  # Number of iterations with no improvement before stopping
+    # Single training run
+    rf_model = rf.fit(balance)
 
-    for iter_step in range(1, 251):  # Incrementally train for up to maxIter
-        rf.setMaxIter(iter_step)  # Set the current number of iterations
-        rf_model = rf.fit(balance)  # Train the model
+    # Predictions
+    rf_pred_train = rf_model.transform(train_1).cache()
+    rf_pred_train.count()  # materialize
+    rf_pred_test = rf_model.transform(test_1).cache()
+    rf_pred_test.count()   # materialize
 
-        # Predictions for train and test data
-        rf_pred_train = rf_model.transform(train_1)
-        rf_pred_test = rf_model.transform(test_1)
+    # Evaluators
+    evaluator = BinaryClassificationEvaluator(labelCol=target_column)
+    auc_pr_train = evaluator.evaluate(rf_pred_train, {evaluator.metricName: "areaUnderPR"})
+    auc_roc_train = evaluator.evaluate(rf_pred_train, {evaluator.metricName: "areaUnderROC"})
+    auc_pr_test = evaluator.evaluate(rf_pred_test, {evaluator.metricName: "areaUnderPR"})
+    auc_roc_test = evaluator.evaluate(rf_pred_test, {evaluator.metricName: "areaUnderROC"})
 
-        # Initialize evaluator
-        evaluator = BinaryClassificationEvaluator(labelCol=target_column)
+    # -- CHANGED: Single-pass confusion matrix
+    train_counts = (
+        rf_pred_train.groupBy("label", "prediction")
+        .agg(F.count("*").alias("cnt"))
+        .collect()
+    )
+    train_count_dict = {(row["label"], row["prediction"]): row["cnt"] for row in train_counts}
 
-        # Calculate metrics
-        auc_pr_train = evaluator.evaluate(rf_pred_train, {evaluator.metricName: "areaUnderPR"})
-        auc_roc_train = evaluator.evaluate(rf_pred_train, {evaluator.metricName: "areaUnderROC"})
-        auc_pr_test = evaluator.evaluate(rf_pred_test, {evaluator.metricName: "areaUnderPR"})
-        auc_roc_test = evaluator.evaluate(rf_pred_test, {evaluator.metricName: "areaUnderROC"})
+    test_counts = (
+        rf_pred_test.groupBy("label", "prediction")
+        .agg(F.count("*").alias("cnt"))
+        .collect()
+    )
+    test_count_dict = {(row["label"], row["prediction"]): row["cnt"] for row in test_counts}
 
-        # Report intermediate results to Optuna
-        trial.report(auc_roc_test, step=iter_step)
+    # Extract confusion matrix metrics
+    # Train
+    train_positive_true_tp = train_count_dict.get((1.0, 1.0), 0)
+    train_positive_pred_tp = sum(v for (l, p), v in train_count_dict.items() if p == 1.0)
+    train_neg_true_fp = train_count_dict.get((0.0, 1.0), 0)
+    train_positive_pred_fp = train_count_dict.get((1.0, 0.0), 0)
 
-        # Check for pruning
-        if trial.should_prune():
-            raise optuna.exceptions.TrialPruned()
+    # Test
+    test_positive_true_tp = test_count_dict.get((1.0, 1.0), 0)
+    test_positive_pred_tp = sum(v for (l, p), v in test_count_dict.items() if p == 1.0)
+    test_neg_true_fp = test_count_dict.get((0.0, 1.0), 0)
+    test_positive_pred_fp = test_count_dict.get((1.0, 0.0), 0)
 
-        # Early stopping logic
-        if auc_roc_test > best_auc:
-            best_auc = auc_roc_test
-            no_improvement_counter = 0
-        else:
-            no_improvement_counter += 1
-
-        if no_improvement_counter >= patience:
-            print(f"Early stopping triggered at iteration {iter_step}")
-            break
-
-    # Calculate additional metrics for the trial
-    train_positive_true_tp = rf_pred_train.filter((rf_pred_train["label"] == 1) & (rf_pred_train["prediction"] == 1)).count()
-    train_positive_pred_tp = rf_pred_train.filter(rf_pred_train["prediction"] == 1).count()
-    train_neg_true_fp = rf_pred_train.filter((rf_pred_train["label"] == 0) & (rf_pred_train["prediction"] == 1)).count()
-    train_positive_pred_fp = rf_pred_train.filter((rf_pred_train["label"] == 1) & (rf_pred_train["prediction"] == 0)).count()
-
-    test_positive_true_tp = rf_pred_test.filter((rf_pred_test["label"] == 1) & (rf_pred_test["prediction"] == 1)).count()
-    test_positive_pred_tp = rf_pred_test.filter(rf_pred_test["prediction"] == 1).count()
-    test_neg_true_fp = rf_pred_test.filter((rf_pred_test["label"] == 0) & (rf_pred_test["prediction"] == 1)).count()
-    test_positive_pred_fp = rf_pred_test.filter((rf_pred_test["label"] == 1) & (rf_pred_test["prediction"] == 0)).count()
-
-    # Append metrics for this trial
+    # Store metrics in global dict
     agg_scor_dict["AUC_PR_Train"].append(auc_pr_train)
     agg_scor_dict["AUC_PR_Test"].append(auc_pr_test)
     agg_scor_dict["AUC_ROC_Train"].append(auc_roc_train)
@@ -109,6 +239,7 @@ def objective(trial):
     agg_scor_dict["stepSize"].append(step_size)
     agg_scor_dict["maxBins"].append(max_bins)
     agg_scor_dict["subSamplingRate"].append(subsampling_rate)
+    agg_scor_dict["maxIter"].append(max_iter)  # -- CHANGED: store it
     agg_scor_dict["train_positive_true_tp"].append(train_positive_true_tp)
     agg_scor_dict["train_positive_pred_tp"].append(train_positive_pred_tp)
     agg_scor_dict["train_neg_true_fp"].append(train_neg_true_fp)
@@ -118,8 +249,87 @@ def objective(trial):
     agg_scor_dict["test_neg_true_fp"].append(test_neg_true_fp)
     agg_scor_dict["test_positive_pred_fp"].append(test_positive_pred_fp)
 
-    # Return the best AUC_ROC on test data as the metric to maximize
-    return best_auc
+    # Print metrics
+    print(f"Trial {trial.number} completed:")
+    for key in agg_scor_dict.keys():
+        print(f"{key}: {agg_scor_dict[key][-1]}")
+
+    # Save partial CSV right after each trial
+    df_scores = pd.DataFrame(agg_scor_dict)
+    df_scores.to_csv(f"optuna_metrics_after_trial_{trial.number}.csv", index=False)
+    print(f"Trial {trial.number} metrics saved to optuna_metrics_after_trial_{trial.number}.csv")
+
+    return auc_roc_test  # We'll optimize for AUC_ROC on test set
+
+#=========================================================================================
+# Perform Bayesian Optimization
+#=========================================================================================
+study = optuna.create_study(direction="maximize")
+n_trials=5
+study.optimize(objective, n_trials=n_trials)
+
+# Save all trial results to CSV
+df_scores = pd.DataFrame(agg_scor_dict)
+df_scores.to_csv(f"optuna_{n_trials}_trials_metrics.csv", index=False)
+print("All trial metrics saved to optuna_{n_trials}_trials_metrics.csv")
+
+print("Best Parameter:")
+print(study.best_params)
+
+# Train final model using best parameters
+best_params = study.best_params
+best_model = GBTClassifier(
+    labelCol="label",
+    featuresCol="features",
+    predictionCol="prediction",
+    maxDepth=best_params["maxDepth"],
+    minInstancesPerNode=best_params["minInstancesPerNode"],
+    stepSize=best_params["stepSize"],
+    maxBins=best_params["maxBins"],
+    subsamplingRate=best_params["subsamplingRate"],
+    seed=22,
+    maxIter=best_params["maxIter"]  # -- CHANGED: use best maxIter
+)
+
+rf_best_model = best_model.fit(balance)
+
+# Evaluate best model
+rf_pred_train = rf_best_model.transform(train_1)
+rf_pred_test = rf_best_model.transform(test_1)
+
+# Initialize evaluator
+evaluator = BinaryClassificationEvaluator(labelCol=target_column)
+best_model_metrics = {
+    "AUC_PR_Train": evaluator.evaluate(rf_pred_train, {evaluator.metricName: "areaUnderPR"}),
+    "AUC_ROC_Train": evaluator.evaluate(rf_pred_train, {evaluator.metricName: "areaUnderROC"}),
+    "AUC_PR_Test": evaluator.evaluate(rf_pred_test, {evaluator.metricName: "areaUnderPR"}),
+    "AUC_ROC_Test": evaluator.evaluate(rf_pred_test, {evaluator.metricName: "areaUnderROC"}),
+}
+
+print("Best Model Metrics:")
+for key, value in best_model_metrics.items():
+    print(f"{key}: {value}")
+
+pd.DataFrame([best_model_metrics]).to_csv(f"{n_trials}_trials_best_model_metrics.csv", index=False)
+print("Best model metrics saved to best_model_metrics.csv")
+
+# Save model
+rf_best_model.write().overwrite().save(
+    f"""hdfs://testdatalake-ns/tables/DM_FRAUD_DETECTION/INC_FRD/gbm_retrain_v5_{
+        best_params["maxDepth"]
+    }_{
+        best_params["minInstancesPerNode"]
+    }_{
+        best_params["stepSize"]
+    }_{
+        best_params["maxBins"]
+    }_{
+        best_params["subsamplingRate"]
+    }_{
+        best_params["maxIter"]
+    }"""
+)
+
 
 
 
