@@ -1,44 +1,61 @@
-from pyspark.sql.functions import col, countDistinct
+from pyspark.sql.functions import col, count, countDistinct, when, expr, to_date, datediff
 from datetime import datetime, timedelta
 
-def count_users_per_product_fn(spark, cfg, prev_dt, latest_dt):
+def count_new_users(spark, cfg, prev_dt, latest_dt):
     # Get master data
     df = get_master_data(spark, cfg)
-    
+
     # Convert prev_dt and latest_dt to Python datetime objects
     start_date = datetime.strptime(prev_dt, "%Y-%m-%d")
     end_date = datetime.strptime(latest_dt, "%Y-%m-%d")
-    
+
     # Initialize an empty DataFrame to store results
     final_df = None
-    
-    # Loop through each date in the range
+
+    # Iterate through each date in the range
     current_date = start_date
     while current_date <= end_date:
-        current_date_str = current_date.strftime("%Y-%m-%d")  # Convert date to string
-        
-        # Filter the DataFrame for the current date
-        filtered_df = df.filter(col("business_date") == current_date_str) \
-                        .filter(col("close_date").isNull()) \
-                        .groupBy("segmt_prod_type", "business_date") \
-                        .agg(countDistinct("ip_id").alias("cumulative_user_count"))
-        
-        # If the filtered DataFrame is not empty, union it with the final DataFrame
+        current_date_str = current_date.strftime("%Y-%m-%d")
+
+        # Filter for the current business_date
+        filtered_df = df.filter(col("business_date") == current_date_str)
+
+        # Skip if no data exists for the current date
+        if filtered_df.count() == 0:
+            current_date += timedelta(days=1)
+            continue
+
+        # Calculate days_diff
+        filtered_df = filtered_df.withColumn("days_diff", datediff(to_date(col("business_date")), to_date(col("open_date"))))
+
+        # Add intermediate columns for each interval
+        filtered_df = filtered_df.withColumn("ip_in_1m", when((col("days_diff") <= 30) & (col("days_diff") >= 0), col("ip_id")))
+        filtered_df = filtered_df.withColumn("ip_in_2m", when((col("days_diff") <= 60) & (col("days_diff") >= 0), col("ip_id")))
+        filtered_df = filtered_df.withColumn("ip_in_6m", when((col("days_diff") <= 180) & (col("days_diff") >= 0), col("ip_id")))
+        filtered_df = filtered_df.withColumn("ip_in_12m", when((col("days_diff") <= 365) & (col("days_diff") >= 0), col("ip_id")))
+
+        # Group by segmt_prod_type and business_date
+        result_df = (
+            filtered_df.groupBy("segmt_prod_type", "business_date")
+            .agg(
+                countDistinct("ip_in_1m").alias("users_past_1_month"),
+                countDistinct("ip_in_2m").alias("users_past_2_months"),
+                countDistinct("ip_in_6m").alias("users_past_6_months"),
+                countDistinct("ip_in_12m").alias("users_past_12_months")
+            )
+        )
+
+        # Union the result with the final DataFrame
         if final_df is None:
-            final_df = filtered_df
+            final_df = result_df
         else:
-            final_df = final_df.union(filtered_df)
-        
+            final_df = final_df.union(result_df)
+
         # Move to the next date
         current_date += timedelta(days=1)
-    
-    # Select the required columns
-    if final_df is not None:
-        final_df = final_df.select("segmt_prod_type", "business_date", "cumulative_user_count")
-    
+
+    # Return the final DataFrame
     return final_df
-
-
 
 
 
