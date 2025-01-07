@@ -1,7 +1,7 @@
-from pyspark.sql.functions import col, count, countDistinct, when, expr, to_date, datediff
+from pyspark.sql.functions import col, mean, max, min, when, to_date, datediff
 from datetime import datetime, timedelta
 
-def count_new_users(spark, cfg, prev_dt, latest_dt):
+def calculate_balance_stats(spark, cfg, prev_dt, latest_dt):
     # Get master data
     df = get_master_data(spark, cfg)
 
@@ -28,34 +28,44 @@ def count_new_users(spark, cfg, prev_dt, latest_dt):
         # Calculate days_diff
         filtered_df = filtered_df.withColumn("days_diff", datediff(to_date(col("business_date")), to_date(col("open_date"))))
 
-        # Add intermediate columns for each interval
-        filtered_df = filtered_df.withColumn("ip_in_1m", when((col("days_diff") <= 30) & (col("days_diff") >= 0), col("ip_id")))
-        filtered_df = filtered_df.withColumn("ip_in_2m", when((col("days_diff") <= 60) & (col("days_diff") >= 0), col("ip_id")))
-        filtered_df = filtered_df.withColumn("ip_in_6m", when((col("days_diff") <= 180) & (col("days_diff") >= 0), col("ip_id")))
-        filtered_df = filtered_df.withColumn("ip_in_12m", when((col("days_diff") <= 365) & (col("days_diff") >= 0), col("ip_id")))
-
-        # Group by segmt_prod_type and business_date
-        result_df = (
+        # Filter data for different time ranges and calculate statistics
+        stats_df = (
             filtered_df.groupBy("segmt_prod_type", "business_date")
             .agg(
-                countDistinct("ip_in_1m").alias("users_past_1_month"),
-                countDistinct("ip_in_2m").alias("users_past_2_months"),
-                countDistinct("ip_in_6m").alias("users_past_6_months"),
-                countDistinct("ip_in_12m").alias("users_past_12_months")
+                # Calculate mean, max, min for 1 month
+                mean(when((col("days_diff") <= 30) & (col("days_diff") >= 0), col("curr_bal_amt"))).alias("mean_balance_1m"),
+                max(when((col("days_diff") <= 30) & (col("days_diff") >= 0), col("curr_bal_amt"))).alias("max_balance_1m"),
+                min(when((col("days_diff") <= 30) & (col("days_diff") >= 0), col("curr_bal_amt"))).alias("min_balance_1m"),
+
+                # Calculate mean, max, min for 2 months
+                mean(when((col("days_diff") <= 60) & (col("days_diff") >= 0), col("curr_bal_amt"))).alias("mean_balance_2m"),
+                max(when((col("days_diff") <= 60) & (col("days_diff") >= 0), col("curr_bal_amt"))).alias("max_balance_2m"),
+                min(when((col("days_diff") <= 60) & (col("days_diff") >= 0), col("curr_bal_amt"))).alias("min_balance_2m"),
+
+                # Calculate mean, max, min for 6 months
+                mean(when((col("days_diff") <= 180) & (col("days_diff") >= 0), col("curr_bal_amt"))).alias("mean_balance_6m"),
+                max(when((col("days_diff") <= 180) & (col("days_diff") >= 0), col("curr_bal_amt"))).alias("max_balance_6m"),
+                min(when((col("days_diff") <= 180) & (col("days_diff") >= 0), col("curr_bal_amt"))).alias("min_balance_6m"),
+
+                # Calculate mean, max, min for 12 months
+                mean(when((col("days_diff") <= 365) & (col("days_diff") >= 0), col("curr_bal_amt"))).alias("mean_balance_12m"),
+                max(when((col("days_diff") <= 365) & (col("days_diff") >= 0), col("curr_bal_amt"))).alias("max_balance_12m"),
+                min(when((col("days_diff") <= 365) & (col("days_diff") >= 0), col("curr_bal_amt"))).alias("min_balance_12m")
             )
         )
 
         # Union the result with the final DataFrame
         if final_df is None:
-            final_df = result_df
+            final_df = stats_df
         else:
-            final_df = final_df.union(result_df)
+            final_df = final_df.union(stats_df)
 
         # Move to the next date
         current_date += timedelta(days=1)
 
     # Return the final DataFrame
     return final_df
+
 
 
 
