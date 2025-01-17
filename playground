@@ -5,14 +5,13 @@ import numpy as np
 
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
-from pyspark.sql import Row, DataFrame
-from pyspark.sql import SparkSession
+from pyspark.sql import Row, DataFrame, SparkSession
 
 def perform_clustering(spark: SparkSession, df: DataFrame, features: list, k: int):
     """
-    Performs K-Means clustering on a local Pandas DataFrame (scikit-learn),
-    rather than Spark ML.
-    
+    Performs K-Means clustering on a local Pandas DataFrame (via scikit-learn),
+    rather than Spark ML. Compatible with sklearn==0.24.0.
+
     Args:
         spark    : SparkSession
         df       : Spark DataFrame containing PWM data
@@ -20,14 +19,15 @@ def perform_clustering(spark: SparkSession, df: DataFrame, features: list, k: in
         k        : Number of clusters
 
     Returns:
-        (df_with_clusters, centers_df, scaler)
+        (df_with_clusters, centers_df, scaler, features_used)
         
-        - df_with_clusters: Spark DF with original columns plus a new 'cluster_id' column
-        - centers_df      : Spark DF where each row = { cluster_id, features (a Python list) }
-        - scaler          : The fitted StandardScaler object (used later for similarity)
+        - df_with_clusters: Spark DF with original columns + a new 'cluster_id' column
+        - centers_df      : Spark DF where each row = { cluster_id, features (Python list) }
+        - scaler          : The fitted StandardScaler object
+        - features_used   : The same list of feature columns (for later use)
     """
     # Convert the relevant columns to Pandas
-    # (Include columns needed for aggregator as well, e.g. bal_amt_sum, transaction_sum_1_month, etc.)
+    # (Include columns needed for aggregation, e.g. bal_amt_sum, etc.)
     columns_needed = [
         "hh_id_in_wh",
         "bal_amt_sum",
@@ -46,47 +46,56 @@ def perform_clustering(spark: SparkSession, df: DataFrame, features: list, k: in
     cluster_ids = kmeans.fit_predict(scaled)
     pdf["cluster_id"] = cluster_ids
 
-    # Build Spark DF from the labeled Pandas DF
+    # Create a Spark DF from the Pandas DF
     df_with_clusters = spark.createDataFrame(pdf)
 
     # Create a Spark DF of cluster centers
-    cluster_centers = kmeans.cluster_centers_  # shape (k, len(features))
+    cluster_centers = kmeans.cluster_centers_  # shape: (k, len(features))
     centers_rows = []
     for i, center in enumerate(cluster_centers):
-        centers_rows.append(Row(features=center.tolist(), cluster_id=int(i)))
+        centers_rows.append(
+            Row(features=center.tolist(), cluster_id=int(i))
+        )
     centers_df = spark.createDataFrame(centers_rows)
 
-    # Return the new Spark DF (with cluster IDs), the centers, and the fitted scaler
-    return df_with_clusters, centers_df, scaler
+    # Return the Spark DF (with cluster IDs), the centers, the scaler, and the features
+    return df_with_clusters, centers_df, scaler, features
 
 
-def calculate_similarity(spark: SparkSession, df: DataFrame, centers_df: DataFrame, assembler, scaler):
+def calculate_similarity(
+    spark: SparkSession,
+    df: DataFrame,
+    centers_df: DataFrame,
+    scaler: StandardScaler,
+    features: list
+):
     """
-    Computes cosine similarity between each row in `df` (Pandas + scikit-learn)
-    and the cluster centers from `centers_df`.
-    
-    The "assembler" argument is unused (kept for signature compatibility).
-    
-    Returns a Spark DF with columns:
-      - All original columns in df
-      - max_similarity (highest similarity to any cluster)
-      - cluster_id (index of the best/closest cluster)
-      - similarity_to_cluster_{i} for each cluster i
+    Computes cosine similarity between each row in `df` (via Pandas + scikit-learn)
+    and the cluster centers from `centers_df`. Compatible with sklearn==0.24.0.
+
+    Args:
+        spark      : SparkSession
+        df         : Spark DF containing consumer data to compare
+        centers_df : Spark DF with columns [cluster_id, features (list of floats)]
+        scaler     : The fitted StandardScaler from perform_clustering
+        features   : The list of feature columns that were scaled
+
+    Returns:
+        Spark DF with:
+          - original columns in df
+          - max_similarity
+          - cluster_id
+          - similarity_to_cluster_{i} for each cluster i (if you want them)
     """
-    # Convert the incoming Spark DF to Pandas
+    # Convert incoming Spark DF to Pandas
     pdf = df.toPandas().fillna(0.0)
 
-    # We need the same feature columns used in the scaler
-    # scikit-learn >= 1.0 exposes them via scaler.feature_names_in_
-    # If older scikit-learn, you must supply them manually. 
-    features = list(scaler.feature_names_in_)
-
-    # Scale using the fitted scaler
+    # Scale using the previously fitted scaler
     subset = pdf[features].values
     scaled_subset = scaler.transform(subset)
 
-    # Fetch cluster centers as a list of Python lists
-    center_rows = centers_df.collect()  # each row has e.g. row["features"] = [float, float, ...]
+    # Fetch cluster centers as a Python list of lists
+    center_rows = centers_df.collect()  # each row has row["features"] = [float, float, ...]
     cluster_centers_list = [row["features"] for row in center_rows]
 
     def cosine_similarity(v1, v2):
@@ -95,30 +104,27 @@ def calculate_similarity(spark: SparkSession, df: DataFrame, centers_df: DataFra
             return 0.0
         return float(np.dot(v1, v2) / denom)
 
-    # For each row in scaled_subset, compute similarity to each cluster
     max_sims = []
     best_clusters = []
-
-    # Optionally store each similarity in separate columns
-    similarity_columns_data = [[] for _ in cluster_centers_list]
+    # Optionally store each cluster similarity
+    cluster_sims_data = [[] for _ in cluster_centers_list]
 
     for row_vec in scaled_subset:
-        sims = [cosine_similarity(row_vec, np.array(center)) for center in cluster_centers_list]
+        sims = [cosine_similarity(row_vec, np.array(c)) for c in cluster_centers_list]
         max_sim = max(sims)
-        cluster_idx = sims.index(max_sim)
+        best_cluster = sims.index(max_sim)
         max_sims.append(max_sim)
-        best_clusters.append(cluster_idx)
-
-        # accumulate each similarity
+        best_clusters.append(best_cluster)
         for i, sim_val in enumerate(sims):
-            similarity_columns_data[i].append(sim_val)
+            cluster_sims_data[i].append(sim_val)
 
+    # Store results in pdf
     pdf["max_similarity"] = max_sims
     pdf["cluster_id"] = best_clusters
 
-    # Create columns for similarity_to_cluster_i
+    # If you want columns for each cluster’s similarity:
     for i in range(len(cluster_centers_list)):
-        pdf[f"similarity_to_cluster_{i}"] = similarity_columns_data[i]
+        pdf[f"similarity_to_cluster_{i}"] = cluster_sims_data[i]
 
     # Convert back to Spark
     out_df = spark.createDataFrame(pdf)
@@ -127,11 +133,11 @@ def calculate_similarity(spark: SparkSession, df: DataFrame, centers_df: DataFra
 
 # prospecting.py
 
-from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import SparkSession, DataFrame
 import pyspark.sql.functions as F
 from pyspark.sql.functions import col, avg
 
-# Import the new scikit-learn-based pipeline
+# Import the new scikit-learn–based pipeline from model_pipeline.py
 from private_wealth_retention.consumer_prospecting.model.model_pipeline import (
     perform_clustering,
     calculate_similarity,
@@ -140,7 +146,7 @@ from private_wealth_retention.consumer_prospecting.model.model_pipeline import (
 def get_prospects(spark: SparkSession, pwm_df: DataFrame, consumer_df: DataFrame, k: int, n: int, feature_cols: list):
     """
     Generates prospects based on similarity to PWM clusters, but using
-    scikit-learn for clustering/similarity (Pandas approach).
+    scikit-learn 0.24.0 for clustering/similarity (Pandas approach).
     
     Args:
         spark       : SparkSession
@@ -162,15 +168,16 @@ def get_prospects(spark: SparkSession, pwm_df: DataFrame, consumer_df: DataFrame
             "transaction_1_month",
             "opened_ar_30d"
           ]
-        (Rows are sorted by similarity_score descending, limited to n.)
+        (Rows sorted by similarity_score DESC, limited to n.)
     """
 
-    # 1) Cluster the PWM data
-    df_with_clusters, centers_df, scaler = perform_clustering(spark, pwm_df, feature_cols, k)
-    # df_with_clusters now has a 'cluster_id' column
+    # 1) Cluster the PWM data (Pandas + scikit-learn)
+    df_with_clusters, centers_df, scaler, used_feats = perform_clustering(
+        spark, pwm_df, feature_cols, k
+    )
+    # df_with_clusters now has 'cluster_id' plus your original columns in Spark
 
     # 2) Calculate cluster-level stats from the PWM data
-    #    (like your original aggregator in prospecting.py)
     cluster_stats = (
         df_with_clusters
         .groupBy("cluster_id")
@@ -182,11 +189,10 @@ def get_prospects(spark: SparkSession, pwm_df: DataFrame, consumer_df: DataFrame
     )
 
     # 3) Calculate similarity for consumer data
-    #    (Spark -> Pandas -> scikit-learn -> back to Spark)
-    similarity_df = calculate_similarity(spark, consumer_df, centers_df, None, scaler)
+    #    (Spark -> Pandas -> scikit-learn -> Spark)
+    similarity_df = calculate_similarity(spark, consumer_df, centers_df, scaler, used_feats)
 
-    # 4) Attach consumer columns that you want in final output
-    #    (We rename them to match your final output columns.)
+    # 4) Rename consumer columns
     consumer_view = consumer_df.select(
         col("hh_id_in_wh"),
         col("bal_amt_sum").alias("consumer_curr_bal_amt"),
@@ -194,6 +200,7 @@ def get_prospects(spark: SparkSession, pwm_df: DataFrame, consumer_df: DataFrame
         col("recent_opened_counts_30d").alias("consumer_opened_ar_30d"),
     )
 
+    # 5) Combine similarity + consumer columns + cluster stats
     final_df = (
         similarity_df
         .join(consumer_view, "hh_id_in_wh", "left")
@@ -210,11 +217,10 @@ def get_prospects(spark: SparkSession, pwm_df: DataFrame, consumer_df: DataFrame
         )
     )
 
-    # 5) Sort descending by similarity_score, limit to n
+    # 6) Sort descending by similarity_score, limit to n
     final_df = final_df.orderBy(F.col("similarity_score").desc()).limit(n)
 
     return final_df
-
 
 
 
@@ -246,26 +252,33 @@ if __name__ == "__main__":
         WHERE business_date = '{business_date}'
     """)
 
-    # Filter your PWM & consumer sets
-    affluent_pwm = df_features.filter((F.col("consumer_pwm") == "pwm") & (F.col("b__affluent") > 0))
-    high_net_worth_pwm = df_features.filter((F.col("consumer_pwm") == "pwm") & (F.col("c__high_net_worth") > 0))
+    # Filter your PWM & consumer subsets
+    affluent_pwm = df_features.filter(
+        (F.col("consumer_pwm") == "pwm") & (F.col("b__affluent") > 0)
+    )
+    high_net_worth_pwm = df_features.filter(
+        (F.col("consumer_pwm") == "pwm") & (F.col("c__high_net_worth") > 0)
+    )
     consumer = df_features.filter(F.col("consumer_pwm") == "consumer")
 
-    # Exclude columns not in your feature set
+    # Exclude columns not in the feature set
     drop_cols = ["hh_id_in_wh", "business_date", "consumer_pwm"]
     features = [f for f in feature_names if f not in drop_cols]
 
-    # 1) Affluent
-    affluent_prospects = get_prospects(spark, affluent_pwm, consumer, k, n, features) \
-        .withColumn("prospect_segmet", F.lit("Affluent"))
+    # 1) Affluent prospects
+    affluent_prospects = get_prospects(
+        spark, affluent_pwm, consumer, k, n, features
+    ).withColumn("prospect_segmet", F.lit("Affluent"))
 
-    # 2) High Net Worth
-    high_net_worth_prospects = get_prospects(spark, high_net_worth_pwm, consumer, k, n, features) \
-        .withColumn("prospect_segmet", F.lit("High Net Worth"))
+    # 2) High Net Worth prospects
+    high_net_worth_prospects = get_prospects(
+        spark, high_net_worth_pwm, consumer, k, n, features
+    ).withColumn("prospect_segmet", F.lit("High Net Worth"))
 
-    # Union them
-    prospects = affluent_prospects.union(high_net_worth_prospects) \
-        .withColumn("business_date", F.lit(business_date))
+    # Union them & add business_date
+    prospects = affluent_prospects.union(high_net_worth_prospects).withColumn(
+        "business_date", F.lit(business_date)
+    )
 
     # Additional steps
     apply_hive(schema)
@@ -277,5 +290,7 @@ if __name__ == "__main__":
         schema,
         mode="overwrite"
     )
+
+
 
 
