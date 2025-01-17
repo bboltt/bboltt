@@ -1,128 +1,281 @@
-from pyspark.sql.functions import col, countDistinct, when, to_date, datediff
+# model_pipeline.py
 
-def count_new_users(spark, cfg, prev_dt, latest_dt):
-    # Get master data
-    df = get_master_data(spark, cfg)
+import pandas as pd
+import numpy as np
 
-    # Filter for the date range [prev_dt, latest_dt]
-    df = df.filter(
-        (col("business_date") >= prev_dt) & 
-        (col("business_date") <= latest_dt)
-    )
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
+from pyspark.sql import Row, DataFrame
+from pyspark.sql import SparkSession
 
-    # Calculate days_diff
-    df = df.withColumn("days_diff", datediff(to_date(col("business_date")), to_date(col("open_date"))))
+def perform_clustering(spark: SparkSession, df: DataFrame, features: list, k: int):
+    """
+    Performs K-Means clustering on a local Pandas DataFrame (scikit-learn),
+    rather than Spark ML.
+    
+    Args:
+        spark    : SparkSession
+        df       : Spark DataFrame containing PWM data
+        features : List of feature column names
+        k        : Number of clusters
 
-    # Add intermediate columns for each interval
-    df = df.withColumn("ip_in_1m", when((col("days_diff") <= 30) & (col("days_diff") >= 0), col("ip_id")))
-    df = df.withColumn("ip_in_2m", when((col("days_diff") <= 60) & (col("days_diff") >= 0), col("ip_id")))
-    df = df.withColumn("ip_in_6m", when((col("days_diff") <= 180) & (col("days_diff") >= 0), col("ip_id")))
-    df = df.withColumn("ip_in_12m", when((col("days_diff") <= 365) & (col("days_diff") >= 0), col("ip_id")))
+    Returns:
+        (df_with_clusters, centers_df, scaler)
+        
+        - df_with_clusters: Spark DF with original columns plus a new 'cluster_id' column
+        - centers_df      : Spark DF where each row = { cluster_id, features (a Python list) }
+        - scaler          : The fitted StandardScaler object (used later for similarity)
+    """
+    # Convert the relevant columns to Pandas
+    # (Include columns needed for aggregator as well, e.g. bal_amt_sum, transaction_sum_1_month, etc.)
+    columns_needed = [
+        "hh_id_in_wh",
+        "bal_amt_sum",
+        "transaction_sum_1_month",
+        "recent_opened_counts_30d",
+    ] + features
+    
+    pdf = df.select(*columns_needed).toPandas().fillna(0.0)
 
-    # Perform groupBy and aggregations for all dates at once
-    result_df = (
-        df.groupBy("segmt_prod_type", "business_date")
+    # Scale the features using StandardScaler
+    scaler = StandardScaler()
+    scaled = scaler.fit_transform(pdf[features].values)
+
+    # K-Means clustering in scikit-learn
+    kmeans = KMeans(n_clusters=k, random_state=42)
+    cluster_ids = kmeans.fit_predict(scaled)
+    pdf["cluster_id"] = cluster_ids
+
+    # Build Spark DF from the labeled Pandas DF
+    df_with_clusters = spark.createDataFrame(pdf)
+
+    # Create a Spark DF of cluster centers
+    cluster_centers = kmeans.cluster_centers_  # shape (k, len(features))
+    centers_rows = []
+    for i, center in enumerate(cluster_centers):
+        centers_rows.append(Row(features=center.tolist(), cluster_id=int(i)))
+    centers_df = spark.createDataFrame(centers_rows)
+
+    # Return the new Spark DF (with cluster IDs), the centers, and the fitted scaler
+    return df_with_clusters, centers_df, scaler
+
+
+def calculate_similarity(spark: SparkSession, df: DataFrame, centers_df: DataFrame, assembler, scaler):
+    """
+    Computes cosine similarity between each row in `df` (Pandas + scikit-learn)
+    and the cluster centers from `centers_df`.
+    
+    The "assembler" argument is unused (kept for signature compatibility).
+    
+    Returns a Spark DF with columns:
+      - All original columns in df
+      - max_similarity (highest similarity to any cluster)
+      - cluster_id (index of the best/closest cluster)
+      - similarity_to_cluster_{i} for each cluster i
+    """
+    # Convert the incoming Spark DF to Pandas
+    pdf = df.toPandas().fillna(0.0)
+
+    # We need the same feature columns used in the scaler
+    # scikit-learn >= 1.0 exposes them via scaler.feature_names_in_
+    # If older scikit-learn, you must supply them manually. 
+    features = list(scaler.feature_names_in_)
+
+    # Scale using the fitted scaler
+    subset = pdf[features].values
+    scaled_subset = scaler.transform(subset)
+
+    # Fetch cluster centers as a list of Python lists
+    center_rows = centers_df.collect()  # each row has e.g. row["features"] = [float, float, ...]
+    cluster_centers_list = [row["features"] for row in center_rows]
+
+    def cosine_similarity(v1, v2):
+        denom = np.linalg.norm(v1) * np.linalg.norm(v2)
+        if denom == 0.0:
+            return 0.0
+        return float(np.dot(v1, v2) / denom)
+
+    # For each row in scaled_subset, compute similarity to each cluster
+    max_sims = []
+    best_clusters = []
+
+    # Optionally store each similarity in separate columns
+    similarity_columns_data = [[] for _ in cluster_centers_list]
+
+    for row_vec in scaled_subset:
+        sims = [cosine_similarity(row_vec, np.array(center)) for center in cluster_centers_list]
+        max_sim = max(sims)
+        cluster_idx = sims.index(max_sim)
+        max_sims.append(max_sim)
+        best_clusters.append(cluster_idx)
+
+        # accumulate each similarity
+        for i, sim_val in enumerate(sims):
+            similarity_columns_data[i].append(sim_val)
+
+    pdf["max_similarity"] = max_sims
+    pdf["cluster_id"] = best_clusters
+
+    # Create columns for similarity_to_cluster_i
+    for i in range(len(cluster_centers_list)):
+        pdf[f"similarity_to_cluster_{i}"] = similarity_columns_data[i]
+
+    # Convert back to Spark
+    out_df = spark.createDataFrame(pdf)
+    return out_df
+
+
+# prospecting.py
+
+from pyspark.sql import DataFrame, SparkSession
+import pyspark.sql.functions as F
+from pyspark.sql.functions import col, avg
+
+# Import the new scikit-learn-based pipeline
+from private_wealth_retention.consumer_prospecting.model.model_pipeline import (
+    perform_clustering,
+    calculate_similarity,
+)
+
+def get_prospects(spark: SparkSession, pwm_df: DataFrame, consumer_df: DataFrame, k: int, n: int, feature_cols: list):
+    """
+    Generates prospects based on similarity to PWM clusters, but using
+    scikit-learn for clustering/similarity (Pandas approach).
+    
+    Args:
+        spark       : SparkSession
+        pwm_df      : Spark DF of PWM clients (affluent or high net worth)
+        consumer_df : Spark DF of consumer prospects
+        k           : Number of clusters
+        n           : Number of top prospects
+        feature_cols: Feature columns to use in clustering/similarity
+    
+    Returns:
+        Spark DataFrame with columns:
+          [
+            "hh_id_in_wh",
+            "similarity_score",
+            "cluster_avg_curr_bal_amt",
+            "cluster_avg_transaction_1_month",
+            "cluster_avg_opened_ar_30d",
+            "curr_bal_amt",
+            "transaction_1_month",
+            "opened_ar_30d"
+          ]
+        (Rows are sorted by similarity_score descending, limited to n.)
+    """
+
+    # 1) Cluster the PWM data
+    df_with_clusters, centers_df, scaler = perform_clustering(spark, pwm_df, feature_cols, k)
+    # df_with_clusters now has a 'cluster_id' column
+
+    # 2) Calculate cluster-level stats from the PWM data
+    #    (like your original aggregator in prospecting.py)
+    cluster_stats = (
+        df_with_clusters
+        .groupBy("cluster_id")
         .agg(
-            countDistinct("ip_in_1m").alias("users_past_1_month"),
-            countDistinct("ip_in_2m").alias("users_past_2_months"),
-            countDistinct("ip_in_6m").alias("users_past_6_months"),
-            countDistinct("ip_in_12m").alias("users_past_12_months")
+            avg("bal_amt_sum").alias("cluster_avg_curr_bal_amt"),
+            avg("transaction_sum_1_month").alias("cluster_avg_transaction_1_month"),
+            avg("recent_opened_counts_30d").alias("cluster_avg_opened_ar_30d"),
         )
     )
 
-    # Return the final result
-    return result_df
+    # 3) Calculate similarity for consumer data
+    #    (Spark -> Pandas -> scikit-learn -> back to Spark)
+    similarity_df = calculate_similarity(spark, consumer_df, centers_df, None, scaler)
 
-
-
-from pyspark.sql.functions import col, mean, max, min, when, to_date, datediff
-
-def product_level_balance(spark, cfg, prev_dt, latest_dt):
-    # Get master data
-    df = get_master_data(spark, cfg)
-
-    # Filter for the date range [prev_dt, latest_dt]
-    df = df.filter(
-        (col("business_date") >= prev_dt) &
-        (col("business_date") <= latest_dt)
+    # 4) Attach consumer columns that you want in final output
+    #    (We rename them to match your final output columns.)
+    consumer_view = consumer_df.select(
+        col("hh_id_in_wh"),
+        col("bal_amt_sum").alias("consumer_curr_bal_amt"),
+        col("transaction_sum_1_month").alias("consumer_transaction_1_month"),
+        col("recent_opened_counts_30d").alias("consumer_opened_ar_30d"),
     )
 
-    # Calculate days_diff
-    df = df.withColumn("days_diff", datediff(to_date(col("business_date")), to_date(col("open_date"))))
-
-    # Perform aggregations for different time ranges
-    result_df = (
-        df.groupBy("segmt_prod_type", "business_date")
-        .agg(
-            # Mean, Max, Min for 1 month
-            mean(when((col("days_diff") <= 30) & (col("days_diff") >= 0), col("curr_bal_amt"))).alias("mean_balance_past_1_month"),
-            max(when((col("days_diff") <= 30) & (col("days_diff") >= 0), col("curr_bal_amt"))).alias("max_balance_past_1_month"),
-            min(when((col("days_diff") <= 30) & (col("days_diff") >= 0), col("curr_bal_amt"))).alias("min_balance_past_1_month"),
-
-            # Mean, Max, Min for 2 months
-            mean(when((col("days_diff") <= 60) & (col("days_diff") >= 0), col("curr_bal_amt"))).alias("mean_balance_past_2_months"),
-            max(when((col("days_diff") <= 60) & (col("days_diff") >= 0), col("curr_bal_amt"))).alias("max_balance_past_2_months"),
-            min(when((col("days_diff") <= 60) & (col("days_diff") >= 0), col("curr_bal_amt"))).alias("min_balance_past_2_months"),
-
-            # Mean, Max, Min for 6 months
-            mean(when((col("days_diff") <= 180) & (col("days_diff") >= 0), col("curr_bal_amt"))).alias("mean_balance_past_6_months"),
-            max(when((col("days_diff") <= 180) & (col("days_diff") >= 0), col("curr_bal_amt"))).alias("max_balance_past_6_months"),
-            min(when((col("days_diff") <= 180) & (col("days_diff") >= 0), col("curr_bal_amt"))).alias("min_balance_past_6_months"),
-
-            # Mean, Max, Min for 12 months
-            mean(when((col("days_diff") <= 365) & (col("days_diff") >= 0), col("curr_bal_amt"))).alias("mean_balance_past_12_months"),
-            max(when((col("days_diff") <= 365) & (col("days_diff") >= 0), col("curr_bal_amt"))).alias("max_balance_past_12_months"),
-            min(when((col("days_diff") <= 365) & (col("days_diff") >= 0), col("curr_bal_amt"))).alias("min_balance_past_12_months")
-        )
-    )
-
-    # Return the final DataFrame
-    return result_df
-
-
-
-
-def count_users_per_product(spark, cfg, open_notopened_df, prev_dt, latest_dt):
-    # Repartition DataFrames for efficient joins
-    open_notopened_df = open_notopened_df.repartition("segmt_prod_type", "business_date").cache()
-    user_count = count_new_users(spark, cfg, prev_dt, latest_dt).repartition("segmt_prod_type", "business_date").cache()
-    product_level_balance_features = product_level_balance(spark, cfg, prev_dt, latest_dt).repartition("segmt_prod_type", "business_date").cache()
-
-    # Join DataFrames in Spark directly
     final_df = (
-        open_notopened_df
-        .join(user_count, on=["segmt_prod_type", "business_date"], how="left")
-        .join(product_level_balance_features, on=["segmt_prod_type", "business_date"], how="left")
+        similarity_df
+        .join(consumer_view, "hh_id_in_wh", "left")
+        .join(cluster_stats, "cluster_id", "left")
+        .select(
+            col("hh_id_in_wh"),
+            col("max_similarity").alias("similarity_score"),
+            col("cluster_avg_curr_bal_amt"),
+            col("cluster_avg_transaction_1_month"),
+            col("cluster_avg_opened_ar_30d"),
+            col("consumer_curr_bal_amt").alias("curr_bal_amt"),
+            col("consumer_transaction_1_month").alias("transaction_1_month"),
+            col("consumer_opened_ar_30d").alias("opened_ar_30d"),
+        )
     )
 
-    # Convert float columns if needed
-    float_cols = [
-        "cumulative_user_count",
-        "users_past_1_month",
-        "users_past_2_months",
-        "users_past_6_months",
-        "users_past_12_months",
-        "mean_balance_past_1_month",
-        "max_balance_past_1_month",
-        "min_balance_past_1_month",
-        "mean_balance_past_2_months",
-        "max_balance_past_2_months",
-        "min_balance_past_2_months",
-        "mean_balance_past_6_months",
-        "max_balance_past_6_months",
-        "min_balance_past_6_months",
-        "mean_balance_past_12_months",
-        "max_balance_past_12_months",
-        "min_balance_past_12_months",
-    ]
-
-    for col_name in float_cols:
-        if col_name in final_df.columns:
-            final_df = final_df.withColumn(col_name, final_df[col_name].cast("float"))
+    # 5) Sort descending by similarity_score, limit to n
+    final_df = final_df.orderBy(F.col("similarity_score").desc()).limit(n)
 
     return final_df
 
 
 
+
+
+# run_prospect.py
+
+from optimal_spark_config.create_spark_instance import generate_spark_instance
+from HiveIO.config import get_config, get_schema
+import pyspark.sql.functions as F
+from HiveIO.IO import write_hive_table_from_schema
+from apply_hive_table import apply_hive
+
+# Import your new function
+from private_wealth_retention.consumer_prospecting.prospecting.prospecting import get_prospects
+
+if __name__ == "__main__":
+    spark = generate_spark_instance(total_memory=600, total_vcpu=300)
+
+    cfg = get_config(..., "config.yaml")
+    schema = get_schema(..., "schema.yml")
+    business_date = cfg["dates"]["business_date"]
+    feature_names = list(cfg["features"]["feature_names"])
+    features_tabl = cfg["tables"]["prospecting_features"]
+    k, n = cfg["model_parameters"]["k"], cfg["model_parameters"]["n_prospects"]
+
+    df_features = spark.sql(f"""
+        SELECT *
+        FROM {schema.databases[0]["name"]}.{features_tabl}
+        WHERE business_date = '{business_date}'
+    """)
+
+    # Filter your PWM & consumer sets
+    affluent_pwm = df_features.filter((F.col("consumer_pwm") == "pwm") & (F.col("b__affluent") > 0))
+    high_net_worth_pwm = df_features.filter((F.col("consumer_pwm") == "pwm") & (F.col("c__high_net_worth") > 0))
+    consumer = df_features.filter(F.col("consumer_pwm") == "consumer")
+
+    # Exclude columns not in your feature set
+    drop_cols = ["hh_id_in_wh", "business_date", "consumer_pwm"]
+    features = [f for f in feature_names if f not in drop_cols]
+
+    # 1) Affluent
+    affluent_prospects = get_prospects(spark, affluent_pwm, consumer, k, n, features) \
+        .withColumn("prospect_segmet", F.lit("Affluent"))
+
+    # 2) High Net Worth
+    high_net_worth_prospects = get_prospects(spark, high_net_worth_pwm, consumer, k, n, features) \
+        .withColumn("prospect_segmet", F.lit("High Net Worth"))
+
+    # Union them
+    prospects = affluent_prospects.union(high_net_worth_prospects) \
+        .withColumn("business_date", F.lit(business_date))
+
+    # Additional steps
+    apply_hive(schema)
+
+    write_hive_table_from_schema(
+        prospects,
+        "DM_WM_DEV",
+        "prospecting_leads",
+        schema,
+        mode="overwrite"
+    )
 
 
