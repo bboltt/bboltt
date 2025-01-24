@@ -1,16 +1,246 @@
+# model_pipeline.py
+
+import pandas as pd
+import numpy as np
+
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
+from pyspark.sql import Row, DataFrame, SparkSession
 
 
-### 2.2 Targeted Population
+def perform_clustering(spark: SparkSession, df: DataFrame, features: list, k: int):
+    """
+    1) Convert PWM Spark DF -> Pandas
+    2) Scale features
+    3) K-Means (scikit-learn)
+    4) Assign cluster_id to each row
+    5) Compute each PWM's distance to cluster center
+    6) Store the max distance per cluster
 
-The **targeted population** for the prospecting model includes individuals meeting the following criteria:
+    Returns:
+        df_with_clusters: Spark DF with original columns + 'cluster_id' + 'distance_to_center'
+        centers_df     : Spark DF of cluster centers => each row has [cluster_id, features (list)]
+        scaler         : Fitted StandardScaler
+        features_used  : The list of features we scaled
+        max_dist_df    : Spark DF with columns [cluster_id, max_distance]
+    """
+    # Columns needed in the Pandas PDF
+    columns_needed = [
+        "hh_id_in_wh",
+        "bal_amt_sum",
+        "transaction_sum_1_month",
+        "recent_opened_counts_30d",
+    ] + features
 
-1. **Assets Under Management (AUM_DOLLAR)**: Individuals with AUM greater than **$1 million**.
-2. **Active Status**: Individuals who are **active customers**, as indicated by recent account activity or transactional engagement.
-3. **No Existing PWM Relationship**: Individuals who currently do not have any assigned PWM relationship.
+    pdf = df.select(*columns_needed).toPandas().fillna(0.0)
 
-These criteria ensure that the model focuses on high-value prospects who are likely to benefit from Private Wealth Management services, aligning with business objectives and operational goals.
+    # 1) Scale
+    scaler = StandardScaler()
+    scaled = scaler.fit_transform(pdf[features].values)
+
+    # 2) K-Means
+    kmeans = KMeans(n_clusters=k, random_state=42)
+    cluster_ids = kmeans.fit_predict(scaled)
+    pdf["cluster_id"] = cluster_ids
+
+    # 3) Compute distance to cluster center
+    cluster_centers = kmeans.cluster_centers_  # shape: (k, len(features))
+    distances = []
+    for i, c_id in enumerate(cluster_ids):
+        dist = np.linalg.norm(scaled[i] - cluster_centers[c_id])
+        distances.append(dist)
+    pdf["distance_to_center"] = distances
+
+    # 4) Build Spark DF from labeled Pandas DF
+    df_with_clusters = spark.createDataFrame(pdf)
+
+    # 5) Also build a Spark DF for cluster centers
+    center_rows = []
+    for i, center in enumerate(cluster_centers):
+        center_rows.append(
+            Row(cluster_id=int(i), features=center.tolist())
+        )
+    centers_df = spark.createDataFrame(center_rows)
+
+    # 6) Build a Spark DF for max distance per cluster
+    #    (the cluster's "radius")
+    #    We can do this in Pandas or Spark. Here, let's just do it in Pandas quickly:
+    gpdf = pdf.groupby("cluster_id")["distance_to_center"].max().reset_index()
+    max_dist_rows = []
+    for row in gpdf.itertuples(index=False):
+        max_dist_rows.append(
+            Row(cluster_id=int(row.cluster_id), max_distance=float(row.distance_to_center))
+        )
+    max_dist_df = spark.createDataFrame(max_dist_rows)
+
+    return df_with_clusters, centers_df, scaler, features, max_dist_df
+
+
+def calculate_similarity_and_filter(
+    spark: SparkSession,
+    df: DataFrame,
+    centers_df: DataFrame,
+    scaler: StandardScaler,
+    features: list,
+    max_dist_df: DataFrame
+):
+    """
+    1) Convert consumer Spark DF -> Pandas
+    2) Scale the same feature columns
+    3) For each row:
+       - Find cluster w/ highest cosine similarity (or you could do "lowest distance")
+       - Compute that distance
+       - Filter out if distance > cluster's max_distance
+    4) Return Spark DF with "max_similarity", "cluster_id", "distance_to_center", etc.
+    """
+    pdf = df.toPandas().fillna(0.0)
+
+    # Scale with the previously fitted scaler
+    subset = pdf[features].values
+    scaled_subset = scaler.transform(subset)
+
+    # Extract cluster centers
+    center_rows = centers_df.collect()  # each row has .features => list of floats
+    cluster_centers_list = [r["features"] for r in center_rows]
+
+    def cosine_similarity(v1, v2):
+        denom = np.linalg.norm(v1) * np.linalg.norm(v2)
+        if denom == 0:
+            return 0.0
+        return float(np.dot(v1, v2) / denom)
+
+    consumer_cluster_ids = []
+    consumer_similarities = []
+    consumer_distances = []
+
+    # We'll also store the similarity to each cluster if you want them.
+    for row_vec in scaled_subset:
+        # Similarities to each cluster center
+        sims = [cosine_similarity(row_vec, np.array(c)) for c in cluster_centers_list]
+        max_sim = max(sims)
+        best_cluster = sims.index(max_sim)
+        consumer_similarities.append(max_sim)
+        consumer_cluster_ids.append(best_cluster)
+
+        # Distance to that best cluster center
+        dist = np.linalg.norm(row_vec - np.array(cluster_centers_list[best_cluster]))
+        consumer_distances.append(dist)
+
+    pdf["cluster_id"] = consumer_cluster_ids
+    pdf["max_similarity"] = consumer_similarities
+    pdf["distance_to_center"] = consumer_distances
+
+    # Convert to Spark
+    out_df = spark.createDataFrame(pdf)
+
+    # Filter out any row where distance_to_center > cluster's max_distance
+    # We'll join with max_dist_df
+    joined = out_df.join(max_dist_df, on="cluster_id", how="left").filter(
+        F.col("distance_to_center") <= F.col("max_distance")
+    )
+
+    return joined
 
 
 
+
+# prospecting.py
+
+from pyspark.sql import DataFrame, SparkSession
+import pyspark.sql.functions as F
+from pyspark.sql.functions import col, avg
+
+# import your scikit-learn K-Means pipeline
+from private_wealth_retention.consumer_prospecting.model.model_pipeline import (
+    perform_clustering,
+    calculate_similarity_and_filter,
+)
+
+def get_prospects(spark, pwm_df, consumer_df, k, n, feature_cols):
+    """
+    1) Cluster the PWM data
+    2) Compute farthest distance for each cluster
+    3) For the consumer data, compute cluster assignment & distance
+    4) Filter out consumers that are beyond that cluster's farthest PWM distance
+    5) Return top N by similarity
+    """
+
+    # 1) Perform K-Means on the PWM
+    #    df_with_clusters => Spark DF with cluster_id, distance_to_center, etc.
+    #    max_dist_df => Spark DF with columns [cluster_id, max_distance]
+    df_with_clusters, centers_df, scaler, used_feats, max_dist_df = perform_clustering(
+        spark, pwm_df, feature_cols, k
+    )
+
+    # 2) Calculate similarity for consumers & filter by distance
+    consumer_with_cluster = calculate_similarity_and_filter(
+        spark, consumer_df, centers_df, scaler, used_feats, max_dist_df
+    )
+    # consumer_with_cluster is already filtered to only those with distance <= cluster's max_distance
+
+    # 3) Optional: gather cluster-level stats from PWM
+    cluster_stats = (
+        df_with_clusters
+        .groupBy("cluster_id")
+        .agg(
+            avg("bal_amt_sum").alias("cluster_avg_curr_bal_amt"),
+            avg("transaction_sum_1_month").alias("cluster_avg_transaction_1_month"),
+            avg("recent_opened_counts_30d").alias("cluster_avg_opened_ar_30d"),
+        )
+    )
+
+    # 4) Attach consumer columns
+    consumer_view = consumer_df.select(
+        col("hh_id_in_wh"),
+        col("bal_amt_sum").alias("consumer_curr_bal_amt"),
+        col("transaction_sum_1_month").alias("consumer_transaction_1_month"),
+        col("recent_opened_counts_30d").alias("consumer_opened_ar_30d"),
+    )
+
+    final_df = (
+        consumer_with_cluster
+        .join(consumer_view, "hh_id_in_wh", "left")
+        .join(cluster_stats, "cluster_id", "left")
+        .select(
+            "hh_id_in_wh",
+            F.col("max_similarity").alias("similarity_score"),
+            "distance_to_center",  # if you want to see how far the consumer is
+            "cluster_avg_curr_bal_amt",
+            "cluster_avg_transaction_1_month",
+            "cluster_avg_opened_ar_30d",
+            F.col("consumer_curr_bal_amt").alias("curr_bal_amt"),
+            F.col("consumer_transaction_1_month").alias("transaction_1_month"),
+            F.col("consumer_opened_ar_30d").alias("opened_ar_30d"),
+        )
+    )
+
+    # 5) Sort descending by similarity, limit to N
+    final_df = final_df.orderBy(F.col("similarity_score").desc()).limit(n)
+
+    return final_df
+
+
+
+
+# run_prospect.py
+
+if __name__ == "__main__":
+    spark = ...
+    # load df_features, filter pwm, consumer, etc.
+    # pick feature_cols, k, n
+
+    # Affluent
+    affluent_prospects = get_prospects(
+        spark, affluent_pwm, consumer, k, n, features
+    ).withColumn("prospect_segmet", F.lit("Affluent"))
+
+    # High Net Worth
+    high_net_worth_prospects = get_prospects(
+        spark, high_net_worth_pwm, consumer, k, n, features
+    ).withColumn("prospect_segmet", F.lit("High Net Worth"))
+
+    # Union and write
+    prospects = affluent_prospects.union(high_net_worth_prospects)
+    ...
 
 
