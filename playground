@@ -77,69 +77,109 @@ def perform_clustering(spark: SparkSession, df: DataFrame, features: list, k: in
 
 
 def calculate_similarity_and_filter(
-    spark: SparkSession,
-    df: DataFrame,
-    centers_df: DataFrame,
-    scaler: StandardScaler,
-    features: list,
-    max_dist_df: DataFrame
+    spark,
+    df,           # large consumer Spark DataFrame
+    centers_df,   # Spark DF with columns: [cluster_id, features (array<double>)]
+    scaler,       # scikit-learn StandardScaler from perform_clustering
+    features,     # list of feature columns used in clustering
+    max_dist_df   # Spark DF with columns: [cluster_id, max_distance]
 ):
     """
-    1) Convert consumer Spark DF -> Pandas
-    2) Scale the same feature columns
-    3) For each row:
-       - Find cluster w/ highest cosine similarity (or you could do "lowest distance")
-       - Compute that distance
-       - Filter out if distance > cluster's max_distance
-    4) Return Spark DF with "max_similarity", "cluster_id", "distance_to_center", etc.
+    Assigns each consumer to its best cluster based on cosine similarity,
+    computes the distance to that cluster center, and filters out consumers
+    whose distance exceeds the cluster's farthest PWM distance.
+
+    Returns a Spark DataFrame with these columns (at minimum):
+      - hh_id_in_wh
+      - cluster_id
+      - max_similarity
+      - distance_to_center
+      - plus any columns that were in `df` except for replaced ones
+      - columns from max_dist_df if needed
+
+    The output is already filtered so that distance_to_center <= max_distance.
     """
-    pdf = df.toPandas().fillna(0.0)
 
-    # Scale with the previously fitted scaler
-    subset = pdf[features].values
-    scaled_subset = scaler.transform(subset)
+    import pyspark.sql.functions as F
+    import math
+    from pyspark.sql.types import DoubleType
+    from pyspark.sql.window import Window
 
-    # Extract cluster centers
-    center_rows = centers_df.collect()  # each row has .features => list of floats
-    cluster_centers_list = [r["features"] for r in center_rows]
+    # 1) Extract scikit-learn scaling info
+    #    We'll replicate mean_/scale_ in Spark for each feature
+    mean_values = list(scaler.mean_)
+    scale_values = list(scaler.scale_)
 
-    def cosine_similarity(v1, v2):
-        denom = np.linalg.norm(v1) * np.linalg.norm(v2)
-        if denom == 0:
-            return 0.0
-        return float(np.dot(v1, v2) / denom)
+    # 2) Build columns to scale each feature in Spark
+    #    For each feature f_i, we create a column: (f_i - mean_i)/scale_i
+    scaled_exprs = []
+    for i, fcol in enumerate(features):
+        scaled_exprs.append(
+            ((F.col(fcol) - mean_values[i]) / scale_values[i]).alias(f"{fcol}_scaled")
+        )
 
-    consumer_cluster_ids = []
-    consumer_similarities = []
-    consumer_distances = []
+    # Keep other columns from df (e.g. "hh_id_in_wh") so we can join later
+    # but do *not* drop them yet. We'll re-select everything we need.
+    all_cols_except_features = [c for c in df.columns if c not in features]
 
-    # We'll also store the similarity to each cluster if you want them.
-    for row_vec in scaled_subset:
-        # Similarities to each cluster center
-        sims = [cosine_similarity(row_vec, np.array(c)) for c in cluster_centers_list]
-        max_sim = max(sims)
-        best_cluster = sims.index(max_sim)
-        consumer_similarities.append(max_sim)
-        consumer_cluster_ids.append(best_cluster)
-
-        # Distance to that best cluster center
-        dist = np.linalg.norm(row_vec - np.array(cluster_centers_list[best_cluster]))
-        consumer_distances.append(dist)
-
-    pdf["cluster_id"] = consumer_cluster_ids
-    pdf["max_similarity"] = consumer_similarities
-    pdf["distance_to_center"] = consumer_distances
-
-    # Convert to Spark
-    out_df = spark.createDataFrame(pdf)
-
-    # Filter out any row where distance_to_center > cluster's max_distance
-    # We'll join with max_dist_df
-    joined = out_df.join(max_dist_df, on="cluster_id", how="left").filter(
-        F.col("distance_to_center") <= F.col("max_distance")
+    # 3) Create a new DataFrame with scaled feature columns + original non-feature columns
+    df_scaled = df.select(
+        *all_cols_except_features,
+        *scaled_exprs
     )
 
-    return joined
+    # 4) Combine the scaled columns into a single array column, e.g. "scaledFeatures"
+    df_scaled = df_scaled.withColumn(
+        "scaledFeatures",
+        F.array([F.col(f"{fcol}_scaled") for fcol in features])
+    )
+
+    # 5) Define UDFs for cosine similarity and Euclidean distance
+    @F.udf(DoubleType())
+    def cos_sim(v1, v2):
+        # v1, v2 are Python lists or tuples of floats
+        dot = 0.0
+        norm1 = 0.0
+        norm2 = 0.0
+        for x, y in zip(v1, v2):
+            dot += x * y
+            norm1 += x * x
+            norm2 += y * y
+        if norm1 == 0.0 or norm2 == 0.0:
+            return 0.0
+        return float(dot / math.sqrt(norm1 * norm2))
+
+    @F.udf(DoubleType())
+    def euc_dist(v1, v2):
+        s = 0.0
+        for x, y in zip(v1, v2):
+            diff = x - y
+            s += diff * diff
+        return float(math.sqrt(s))
+
+    # 6) Cross join each consumer row with each cluster center => compute similarity, distance
+    #    Make sure "features" in centers_df is an array<double> (scaled center).
+    df_join = df_scaled.crossJoin(centers_df)
+
+    df_join = df_join \
+        .withColumn("cos_similarity", cos_sim("scaledFeatures", "features")) \
+        .withColumn("distance_to_center", euc_dist("scaledFeatures", "features"))
+
+    # 7) For each consumer (identified by something like hh_id_in_wh),
+    #    pick the single cluster with the maximum similarity
+    w = Window.partitionBy("hh_id_in_wh").orderBy(F.col("cos_similarity").desc())
+    df_best = df_join \
+        .withColumn("rn", F.row_number().over(w)) \
+        .filter(F.col("rn") == 1) \
+        .drop("rn") \
+        .withColumnRenamed("cos_similarity", "max_similarity")
+
+    # 8) Join with the cluster's max_distance and filter out consumers beyond that radius
+    df_filtered = df_best.join(max_dist_df, on="cluster_id", how="left") \
+                         .filter(F.col("distance_to_center") <= F.col("max_distance"))
+
+    return df_filtered
+
 
 
 
