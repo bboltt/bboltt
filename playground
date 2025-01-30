@@ -1,3 +1,132 @@
+#!/usr/bin/env python
+# run_feature_importance.py
+
+import sys
+import pyspark.sql.functions as F
+from pyspark.sql import SparkSession
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+import pandas as pd
+import numpy as np
+
+from optimal_spark_config.create_spark_instance import generate_spark_instance
+from HiveIO.config import get_config, get_schema
+
+def main(config_name="config.yaml", top_n=20):
+    """
+    1) Loads config & schema.
+    2) Reads the 'features' table (df_features).
+    3) Trains a tree-based model to classify Consumer vs. PWM.
+    4) Prints top feature importances.
+    5) Optionally updates config or returns them for usage in clustering.
+    """
+
+    # 1) Create Spark session
+    spark = generate_spark_instance(total_memory=600, total_vcpu=300)
+
+    # 2) Load config & schema
+    #    If you want to pass a different config file, do: python run_feature_importance.py my_config.yaml
+    cfg = get_config(None, config_name)  # 'None' or some module reference for the first argument
+    schema = get_schema(None, "schema.yml")  # or use config if you have a separate schema name
+
+    # 3) Identify the table & features from config
+    features_tabl = cfg["tables"]["prospecting_features"]
+    db_name = schema.databases[0]["name"]
+    feature_names = list(cfg["features"]["feature_names"])
+
+    # 4) Decide which columns to load
+    #    We'll load the label column "consumer_pwm" plus the feature columns.
+    #    If there's a "business_date", filter or choose the latest, etc.
+    business_date = cfg["dates"]["business_date"]
+
+    # 5) Read the table
+    df_features = spark.sql(f"""
+        SELECT *
+        FROM {db_name}.{features_tabl}
+        WHERE business_date = '{business_date}'
+    """)
+
+    # 6) We'll classify PWM (label=1) vs Consumer (label=0).
+    #    Filter out any rows that aren't "pwm" or "consumer" if necessary.
+    df_features = df_features.filter(F.col("consumer_pwm").isin(["pwm", "consumer"]))
+
+    # 7) Collect to Pandas. Only load the columns we need:
+    #    label column: consumer_pwm
+    #    feature columns: feature_names
+    selected_cols = ["consumer_pwm"] + feature_names
+    pdf = df_features.select(*selected_cols).toPandas()
+
+    # 8) Convert label to numeric: 1 = pwm, 0 = consumer
+    pdf["label"] = np.where(pdf["consumer_pwm"] == "pwm", 1, 0)
+
+    # 9) Fill NaN with 0 or a suitable default
+    pdf = pdf.fillna(0)
+
+    # 10) Prepare X, y for training
+    X = pdf[feature_names].values
+    y = pdf["label"].values
+
+    # 11) Split for a quick train/test (optional)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42
+    )
+
+    # 12) Train a RandomForest (tree-based) to get feature importances
+    rf = RandomForestClassifier(
+        n_estimators=100,
+        max_depth=8,
+        random_state=42
+    )
+    rf.fit(X_train, y_train)
+
+    # 13) Compute feature importances
+    importances = rf.feature_importances_
+    feature_importance_pairs = list(zip(feature_names, importances))
+    # Sort by importance desc
+    feature_importance_pairs.sort(key=lambda x: x[1], reverse=True)
+
+    # 14) Print top-N features
+    print(f"\nTop {top_n} Most Important Features for PWM vs Consumer:\n{'-'*60}")
+    for i, (fname, imp) in enumerate(feature_importance_pairs[:top_n], start=1):
+        print(f"{i}. {fname} => {imp:.4f}")
+
+    # 15) If you want to store them back into config or a file, do so here
+    #     For example, let's store top_n features in the config under "features" -> "selected"
+    selected_top_features = [f[0] for f in feature_importance_pairs[:top_n]]
+    print(f"\nSelected top {top_n} features:\n{selected_top_features}\n")
+
+    # You could optionally write them to config. Example pseudo-code:
+    # cfg["features"]["selected"] = selected_top_features
+    # save_config(cfg, "new_config.yaml")  # you'd need a function to write config back
+
+    # 16) Stop Spark (optional if you'd like)
+    spark.stop()
+
+
+if __name__ == "__main__":
+    # You can parse arguments from sys.argv if you want:
+    # e.g. python run_feature_importance.py config.yaml 15
+    # or just rely on defaults
+    import sys
+
+    if len(sys.argv) >= 2:
+        cfg_file = sys.argv[1]
+    else:
+        cfg_file = "config.yaml"
+
+    if len(sys.argv) >= 3:
+        top_n = int(sys.argv[2])
+    else:
+        top_n = 20
+
+    main(cfg_file, top_n)
+
+
+
+
+
+
+
 # model_pipeline.py
 
 import pandas as pd
