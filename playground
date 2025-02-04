@@ -7,117 +7,171 @@ from pyspark.sql import SparkSession
 from pyspark.ml.feature import VectorAssembler
 from pyspark.ml.classification import RandomForestClassifier
 from pyspark.ml import Pipeline
+from datetime import datetime, timedelta
 
+# Example: import your project modules
+import private_wealth_retention.consumer_prospecting as cp
 from optimal_spark_config.create_spark_instance import generate_spark_instance
 from HiveIO.config import get_config, get_schema
+from HiveIO.io import set_data_config
 
 
-def main(config_name="config.yaml", top_n=20):
+def train_rf_and_get_importances(df_labeled, feature_list, label_col="label", n_trees=100, max_depth=5, seed=42):
     """
-    1) Loads config & schema.
-    2) Reads the 'prospecting_features' table in Spark (5M+ rows).
-    3) Trains a Spark ML RandomForest to classify consumer (0) vs. PWM (1).
-    4) Extracts and prints top-N feature importances.
-    5) Optionally store them back to config if desired.
+    A pure function that:
+      1) Builds a VectorAssembler and RandomForest pipeline.
+      2) Trains the model on df_labeled (Spark DataFrame).
+      3) Returns a sorted list of (feature_name, importance) in descending order.
+
+    This can be unit tested by passing in a small Spark DataFrame.
     """
-
-    # 1) Create or get Spark session
-    spark = generate_spark_instance(total_memory=600, total_vcpu=300)
-
-    # 2) Load config & schema
-    cfg = get_config(None, config_name)  # Adjust if needed
-    schema = get_schema(None, "schema.yml")
-
-    # 3) Identify table & columns
-    db_name = schema.databases[0]["name"]
-    features_tabl = cfg["tables"]["prospecting_features"]
-    feature_names = list(cfg["features"]["feature_names"])
-    business_date = cfg["dates"]["business_date"]
-
-    # 4) Load data from Hive/SQL
-    df_features = spark.sql(f"""
-        SELECT *
-        FROM {db_name}.{features_tabl}
-        WHERE business_date = '{business_date}'
-    """)
-
-    # Filter to consumer vs pwm only
-    df_features = df_features.filter(F.col("consumer_pwm").isin(["consumer", "pwm"]))
-
-    # 5) Create a label column: 1 for pwm, 0 for consumer
-    #    (Spark ML needs numeric label.)
-    df_labeled = df_features.withColumn(
-        "label",
-        F.when(F.col("consumer_pwm") == "pwm", 1.0).otherwise(0.0)
-    )
-
-    # 6) Build a VectorAssembler to gather features into "features" column.
-    #    Handle invalid means if any feature is non-numeric, it will skip that row.
+    # Build a VectorAssembler
     assembler = VectorAssembler(
-        inputCols=feature_names,
+        inputCols=feature_list,
         outputCol="features",
-        handleInvalid="skip"
+        handleInvalid="skip"   # skip rows with invalid (non-numeric) values
     )
 
-    # 7) Build a RandomForestClassifier
+    # Build a RandomForest
     rf = RandomForestClassifier(
         featuresCol="features",
-        labelCol="label",
-        numTrees=100,
-        maxDepth=8,       # tweak as needed
-        seed=42
+        labelCol=label_col,
+        numTrees=n_trees,
+        maxDepth=max_depth,
+        seed=seed
     )
 
-    # 8) Build a Pipeline to do (Assembler -> RandomForest)
+    # Build a Pipeline
     pipeline = Pipeline(stages=[assembler, rf])
     model = pipeline.fit(df_labeled)
 
-    # 9) Extract the fitted RF model
-    rf_model = model.stages[-1]  # last stage is RandomForestClassifierModel
+    # The last stage is our trained RandomForestClassificationModel
+    rf_model = model.stages[-1]
 
-    # 10) Get feature importances
-    importances = rf_model.featureImportances  # This is a Spark ML Vector
+    # Extract feature importances (Spark ML vector) => convert to python list
+    importances = rf_model.featureImportances
+    importances_list = importances.toArray()
 
-    # Convert the Spark vector of importances to a python list
-    importances_list = importances.toArray()  # e.g. [0.12, 0.01, 0.15, ...]
-
-    # Pair each feature name with its importance
-    feature_importance_pairs = list(zip(feature_names, importances_list))
-
-    # Sort by importance descending
+    # Pair each feature with its importance
+    feature_importance_pairs = list(zip(feature_list, importances_list))
+    # Sort descending by importance
     feature_importance_pairs.sort(key=lambda x: x[1], reverse=True)
 
-    # Print top-N
-    print(f"\nTop {top_n} Most Important Features (Spark ML RandomForest):\n{'-'*60}")
-    for i, (fname, imp) in enumerate(feature_importance_pairs[:top_n], start=1):
-        print(f"{i}. {fname} => {imp:.4f}")
+    return feature_importance_pairs
 
-    # Build a list of the top-N selected features
-    selected_top_features = [f[0] for f in feature_importance_pairs[:top_n]]
-    print(f"\nSelected top {top_n} features:\n{selected_top_features}\n")
 
-    # (Optional) Store them in config, if you have a mechanism to save config:
-    # cfg["features"]["selected"] = selected_top_features
-    # save_config(cfg, config_name)
+def save_top_features_to_datalake(spark, table_name, business_date, top_features_with_importance, top_n=30, mode="append"):
+    """
+    Saves the top-N features (and their importances) to a table in the data lake.
+    Table schema example:
+      business_date: string/date
+      feature_name:  string
+      rank:          integer
+      importance:    double
 
-    # Stop Spark if needed
+    You can read from this table later (instead of config) to get the best features.
+    """
+    # Slice top N
+    sliced = top_features_with_importance[:top_n]
+
+    # Build list of rows: (business_date, feature_name, rank, importance)
+    rows = []
+    for rank, (feat, imp) in enumerate(sliced, start=1):
+        rows.append((business_date, feat, rank, float(imp)))
+
+    # Create Spark DataFrame
+    columns = ["business_date", "feature_name", "rank", "importance"]
+    df_save = spark.createDataFrame(rows, columns)
+
+    # Write to data lake table (Hive table) with desired mode (append/overwrite)
+    df_save.write.saveAsTable(table_name, mode=mode)
+    # or df_save.write.insertInto(table_name, overwrite=...)
+    # or use df_save.write.format("parquet").saveAsTable(...)
+    # depending on your environment
+
+
+def main(top_n=30):
+    """
+    Main driver function:
+      - Creates Spark session
+      - Loads config and data
+      - Filters data to PWM/Consumer
+      - Builds label col
+      - Calls train_rf_and_get_importances
+      - Prints top-N, saves them to data lake table
+    """
+
+    spark = generate_spark_instance(total_memory=600, total_vcpu=30)
+
+    # 1) Load config & schema
+    cfg = get_config(cp, "config.yaml")
+    schema = get_schema(cp, "schema.yml")
+
+    business_date = cfg["dates"]["business_date"]
+    feature_names = list(cfg["feature_names"])
+    features_table = cfg["tables"]["prospecting_features"]
+    db_name = schema["databases"]["name"]
+
+    # 2) (Optional) If you have a standard function to load data:
+    load_data_from, get_table_partitions, _, _ = set_data_config(spark, cfg)
+    df_features = load_data_from(features_table)
+    # Otherwise, you could do:
+    # df_features = spark.sql(f"SELECT * FROM {db_name}.{features_table} ...")
+
+    # 3) Filter to consumer or pwm
+    df_features = df_features.filter(F.col("consumer_pwm").isin(["pwm", "consumer"]))
+
+    # 4) Create numeric label
+    df_labeled = df_features.withColumn(
+        "label",
+        F.when(F.col("consumer_pwm") == "pwm", F.lit(1.0)).otherwise(F.lit(0.0))
+    )
+
+    # 5) Clean up feature list
+    #    Example: remove columns we know are not numeric
+    drop_cols = ["hh_id_in_wh", "business_date", "consumer_pwm"]
+    feature_list = [f.lower() for f in feature_names if f not in drop_cols]
+
+    # 6) Train the RF model and get all features' importances
+    feature_importance_pairs = train_rf_and_get_importances(
+        df_labeled,
+        feature_list,
+        label_col="label",
+        n_trees=100,
+        max_depth=5,
+        seed=42
+    )
+
+    # Print top N
+    print(f"\nTop {top_n} Most Important Features (Spark ML RandomForest):\n")
+    for i, (feature, importance) in enumerate(feature_importance_pairs[:top_n], start=1):
+        print(f"{i}. {feature}: {importance:.4f}")
+
+    # 7) Save them to the data lake so you can load them later
+    #    Suppose we store in a new table in the same DB, e.g. 'top_feature_importances'
+    top_features_table = f"{db_name}.top_feature_importances"
+    save_top_features_to_datalake(
+        spark,
+        table_name=top_features_table,
+        business_date=business_date,
+        top_features_with_importance=feature_importance_pairs,
+        top_n=top_n,
+        mode="append"  # or "overwrite"
+    )
+
+    # 8) Stop Spark
     spark.stop()
 
 
 if __name__ == "__main__":
-    # Usage:  python run_feature_importance.py config.yaml 15
-    # or just rely on defaults
+    # Possibly parse top_n from command line
     if len(sys.argv) >= 2:
-        cfg_file = sys.argv[1]
+        top_n = int(sys.argv[1])
     else:
-        cfg_file = "config.yaml"
+        top_n = 30
 
-    if len(sys.argv) >= 3:
-        top_n = int(sys.argv[2])
-    else:
-        top_n = 20
+    main(top_n)
 
-    main(cfg_file, top_n)
 
 
 
