@@ -368,78 +368,73 @@ def calculate_similarity_and_filter(
 
 # prospecting.py
 
-from pyspark.sql import DataFrame, SparkSession
-import pyspark.sql.functions as F
-from pyspark.sql.functions import col, avg
+# prospecting.py
 
-# import your scikit-learn K-Means pipeline
+import pyspark.sql.functions as F
+from pyspark.sql import DataFrame, SparkSession
 from private_wealth_retention.consumer_prospecting.model.model_pipeline import (
     perform_clustering,
-    calculate_similarity_and_filter,
+    calculate_similarity_and_filter  # or your final approach to consumer assignment
 )
 
-def get_prospects(spark, pwm_df, consumer_df, k, n, feature_cols):
+def get_prospects(spark: SparkSession,
+                  pwm_df: DataFrame,
+                  consumer_df: DataFrame,
+                  k: int,
+                  n: int,
+                  feature_cols: list,
+                  prospect_segment: str,
+                  business_date: str):
     """
-    1) Cluster the PWM data
-    2) Compute farthest distance for each cluster
-    3) For the consumer data, compute cluster assignment & distance
-    4) Filter out consumers that are beyond that cluster's farthest PWM distance
-    5) Return top N by similarity
+    1) Perform K-Means on PWM data (affluent or high_net_worth).
+    2) Assign each PWM client a cluster, store cluster_id + distance_to_center, etc.
+    3) For consumers, compute similarity/distance, pick the best cluster, 
+       and limit to top N prospects by similarity.
+    4) Return two DataFrames:
+       - df_pwm_clusters: minimal columns for existing PWM
+       - df_prospects: minimal columns for identified prospects
     """
 
-    # 1) Perform K-Means on the PWM
-    #    df_with_clusters => Spark DF with cluster_id, distance_to_center, etc.
-    #    max_dist_df => Spark DF with columns [cluster_id, max_distance]
-    df_with_clusters, centers_df, scaler, used_feats, max_dist_df = perform_clustering(
+    # 1) Cluster the PWM data using your 'perform_clustering' function.
+    #    Make sure that function returns distance_to_center for each row
+    #    (via e.g. an added column or storing in a new DF).
+    df_pwm_clustered, centers_df, scaler, used_features, max_dist_df = perform_clustering(
         spark, pwm_df, feature_cols, k
     )
+    # df_pwm_clustered is your PWM data with columns like: hh_id_in_wh, cluster_id, distance_to_center, etc.
 
-    # 2) Calculate similarity for consumers & filter by distance
-    consumer_with_cluster = calculate_similarity_and_filter(
-        spark, consumer_df, centers_df, scaler, used_feats, max_dist_df
-    )
-    # consumer_with_cluster is already filtered to only those with distance <= cluster's max_distance
-
-    # 3) Optional: gather cluster-level stats from PWM
-    cluster_stats = (
-        df_with_clusters
-        .groupBy("cluster_id")
-        .agg(
-            avg("bal_amt_sum").alias("cluster_avg_curr_bal_amt"),
-            avg("transaction_sum_1_month").alias("cluster_avg_transaction_1_month"),
-            avg("recent_opened_counts_30d").alias("cluster_avg_opened_ar_30d"),
-        )
+    # 2) Build a minimal DataFrame for PWM cluster assignments
+    df_pwm_clusters = df_pwm_clustered.select(
+        F.col("hh_id_in_wh"),
+        F.col("cluster_id"),
+        F.col("distance_to_center"),
+        F.lit(business_date).alias("business_date")
     )
 
-    # 4) Attach consumer columns
-    consumer_view = consumer_df.select(
-        col("hh_id_in_wh"),
-        col("bal_amt_sum").alias("consumer_curr_bal_amt"),
-        col("transaction_sum_1_month").alias("consumer_transaction_1_month"),
-        col("recent_opened_counts_30d").alias("consumer_opened_ar_30d"),
+    # 3) Assign clusters to consumers, compute distance, filter if desired.
+    df_assigned = calculate_similarity_and_filter(
+        spark, consumer_df, centers_df, scaler, used_features, max_dist_df
+    )
+    # Suppose the returned DF has columns: hh_id_in_wh, max_similarity, distance_to_center, cluster_id, etc.
+
+    # 4) Pick top N by similarity
+    df_top = df_assigned.orderBy(F.col("max_similarity").desc()).limit(n)
+
+    # 5) Build a minimal DataFrame for prospects
+    df_prospects = df_top.select(
+        F.col("hh_id_in_wh"),
+        F.col("max_similarity").alias("similarity_score"),
+        F.col("distance_to_center"),
+        F.lit(prospect_segment).alias("prospect_segment"),
+        F.col("cluster_id"),
+        F.lit(business_date).alias("business_date")
     )
 
-    final_df = (
-        consumer_with_cluster
-        .join(consumer_view, "hh_id_in_wh", "left")
-        .join(cluster_stats, "cluster_id", "left")
-        .select(
-            "hh_id_in_wh",
-            F.col("max_similarity").alias("similarity_score"),
-            "distance_to_center",  # if you want to see how far the consumer is
-            "cluster_avg_curr_bal_amt",
-            "cluster_avg_transaction_1_month",
-            "cluster_avg_opened_ar_30d",
-            F.col("consumer_curr_bal_amt").alias("curr_bal_amt"),
-            F.col("consumer_transaction_1_month").alias("transaction_1_month"),
-            F.col("consumer_opened_ar_30d").alias("opened_ar_30d"),
-        )
-    )
+    # Return two DataFrames:
+    # - df_pwm_clusters (PWM assignments)
+    # - df_prospects (consumer prospects)
+    return df_pwm_clusters, df_prospects
 
-    # 5) Sort descending by similarity, limit to N
-    final_df = final_df.orderBy(F.col("similarity_score").desc()).limit(n)
-
-    return final_df
 
 
 
