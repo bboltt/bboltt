@@ -441,23 +441,48 @@ def get_prospects(spark: SparkSession,
 
 # run_prospect.py
 
-if __name__ == "__main__":
-    spark = ...
-    # load df_features, filter pwm, consumer, etc.
-    # pick feature_cols, k, n
+# run_prospect.py
 
-    # Affluent
-    affluent_prospects = get_prospects(
-        spark, affluent_pwm, consumer, k, n, features
-    ).withColumn("prospect_segmet", F.lit("Affluent"))
+def main():
+    spark = generate_spark_instance(total_memory=600, total_vcpu=300)
+    cfg = get_config(cp, "config.yaml")
+    schema = get_schema(cp, "schema.yml")
 
-    # High Net Worth
-    high_net_worth_prospects = get_prospects(
-        spark, high_net_worth_pwm, consumer, k, n, features
-    ).withColumn("prospect_segmet", F.lit("High Net Worth"))
+    # load features
+    # read selected features from the "selected_features_table" in data lake, etc.
+    # gather PWM subsets & consumer subset...
 
-    # Union and write
-    prospects = affluent_prospects.union(high_net_worth_prospects)
-    ...
+    # for "Affluent" PWM
+    df_pwm_clusters_affluent, df_prospects_affluent = get_prospects(
+        spark,
+        pwm_affluent,
+        consumer,
+        k,
+        n,
+        selected_features,
+        prospect_segment="Affluent",
+        business_date=business_date
+    )
 
+    # for "High Net Worth" PWM
+    df_pwm_clusters_hnw, df_prospects_hnw = get_prospects(
+        spark,
+        pwm_high_net_worth,
+        consumer,
+        k,
+        n,
+        selected_features,
+        prospect_segment="High Net Worth",
+        business_date=business_date
+    )
+
+    # union the clusters if you want a single table, or save them separately
+    df_clusters_all = df_pwm_clusters_affluent.union(df_pwm_clusters_hnw)
+    df_prospects_all = df_prospects_affluent.union(df_prospects_hnw)
+
+    # store them as needed
+    # e.g. df_clusters_all.write.saveAsTable(...)
+    # e.g. df_prospects_all.write.saveAsTable(...)
+
+    spark.stop()
 
