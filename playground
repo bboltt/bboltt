@@ -1,3 +1,111 @@
+# insight_pipeline.py
+# Placed in private_wealth_retention/consumer_prospecting/model/
+
+import pyspark.sql.functions as F
+from pyspark.ml.feature import VectorAssembler
+from pyspark.ml.classification import RandomForestClassifier
+from pyspark.ml import Pipeline
+
+def train_cluster_insight_model(df: "DataFrame",
+                                cluster_col: str,
+                                cluster_id: int,
+                                feature_cols: list,
+                                label_col: str = "label",
+                                seed: int = 42):
+    """
+    Trains a RandomForest (Spark ML) to distinguish "prospects in cluster_id"
+    vs. "prospects in other clusters" by setting label=1 for the cluster, else 0.
+    Returns a list of (feature, importance) sorted descending.
+    """
+    # 1) Build label: 1 if cluster_col == cluster_id, else 0
+    df_labeled = df.withColumn(
+        label_col,
+        F.when(F.col(cluster_col) == cluster_id, 1.0).otherwise(0.0)
+    )
+
+    # 2) VectorAssembler
+    assembler = VectorAssembler(
+        inputCols=feature_cols,
+        outputCol="features",
+        handleInvalid="skip"
+    )
+
+    # 3) RandomForest
+    rf = RandomForestClassifier(
+        featuresCol="features",
+        labelCol=label_col,
+        numTrees=50,      # can adjust
+        maxDepth=5,       # can adjust
+        seed=seed
+    )
+
+    pipeline = Pipeline(stages=[assembler, rf])
+    model = pipeline.fit(df_labeled)
+
+    # 4) Extract feature importances
+    rf_model = model.stages[-1]
+    importances = rf_model.featureImportances.toArray()
+    feature_importance_pairs = list(zip(feature_cols, importances))
+    feature_importance_pairs.sort(key=lambda x: x[1], reverse=True)
+    return feature_importance_pairs
+
+
+def compute_cluster_mean_std(df, cluster_id, pwm_cluster_col, feature_cols):
+    """
+    Given a DataFrame of PWM data (or you can filter it before calling),
+    compute mean and std for each feature in feature_cols among
+    the PWM who belong to cluster_id.
+    Returns a dict: { feature: (mean, std), ... }
+    """
+    # Filter PWM for cluster_id
+    df_filtered = df.filter(F.col(pwm_cluster_col) == cluster_id)
+
+    # compute mean/std for each feature
+    agg_exprs = []
+    for fcol in feature_cols:
+        agg_exprs.append(F.mean(fcol).alias(f"{fcol}_mean"))
+        agg_exprs.append(F.stddev_pop(fcol).alias(f"{fcol}_std"))  # or stddev_samp
+
+    row_stats = df_filtered.agg(*agg_exprs).collect()[0]
+    # Build a dict: feature -> (mean, std)
+    stats_dict = {}
+    for fcol in feature_cols:
+        mean_val = row_stats[f"{fcol}_mean"] if row_stats[f"{fcol}_mean"] is not None else 0.0
+        std_val = row_stats[f"{fcol}_std"] if row_stats[f"{fcol}_std"] is not None else 0.0
+        stats_dict[fcol] = (float(mean_val), float(std_val))
+    return stats_dict
+
+
+def generate_insight_string(top_features, row_values, cluster_stats):
+    """
+    Build a single string describing top 5 features (or fewer).
+    `top_features`: [(featureName, importance), ...] sorted descending
+    `row_values`:   dict with { featureName -> this prospect's value }
+    `cluster_stats`: dict with { featureName -> (mean, std) }
+
+    Returns a single string containing each feature's value, cluster's mean,
+    and [mean ± 2*std] range.
+    """
+    # Only take top 5
+    top_5 = top_features[:5]
+    lines = []
+    for i, (feat, imp) in enumerate(top_5, start=1):
+        val = row_values.get(feat, 0.0)
+        mean_val, std_val = cluster_stats.get(feat, (0.0, 0.0))
+        lower = mean_val - 2 * std_val
+        upper = mean_val + 2 * std_val
+        line = (f"{i}) Feature: {feat}, value={val}, "
+                f"cluster mean={mean_val:.2f}, range=[{lower:.2f}, {upper:.2f}]")
+        lines.append(line)
+
+    insight_str = " | ".join(lines)
+    return insight_str
+
+
+
+
+
+
 #!/usr/bin/env python
 # run_feature_importance.py
 
