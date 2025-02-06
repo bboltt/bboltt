@@ -1,3 +1,166 @@
+# run_insight.py
+
+import sys
+import pyspark.sql.functions as F
+
+from optimal_spark_config.create_spark_instance import generate_spark_instance
+from HiveIO.config import get_config, get_schema
+from HiveIO.io import set_data_config
+from private_wealth_retention.consumer_prospecting.model.insight_pipeline import (
+    train_cluster_insight_model,
+    compute_cluster_mean_std,
+    generate_insight_string
+)
+
+def main():
+    spark = generate_spark_instance(total_memory=600, total_vcpu=300)
+
+    # 1) Load config, schema, etc.
+    #    or skip if you only rely on tables from data lake
+    #    We'll assume we have a config with table names
+    cfg = get_config(None, "config.yaml")  
+    schema = get_schema(None, "schema.yml")
+    db_name = schema["databases"][0]["name"]
+    business_date = cfg["dates"]["business_date"]
+
+    # 2) We assume we have two tables (or data files):
+    #    a) df_prospects_all => minimal columns + cluster_id
+    #    b) df_pwm_clusters_all => minimal columns + cluster_id
+    #    c) We also need the underlying feature columns for those prospects/pwm
+    #       so we can read them or join them from the original data.
+
+    #    Let's say we have:
+    prospects_table = "DM_WM_DEV.prospects_all"
+    pwm_table = "DM_WM_DEV.pwm_clusters_all"
+    features_table = cfg["tables"]["prospecting_features"]  # full feature data?
+
+    # Or load from data lake config if you prefer:
+    load_data_from, get_table_partitions, _, _ = set_data_config(spark, cfg)
+
+    df_prospects_base = load_data_from(prospects_table)
+    df_pwm_base = load_data_from(pwm_table)
+    # For actual feature values, we can load from features_table
+    df_features = load_data_from(features_table).filter(F.col("business_date") == business_date)
+
+    # 3) We need to join the features to each row so we know the numeric columns
+    #    for each hh_id_in_wh. We'll assume "hh_id_in_wh" is the join key.
+    #    We'll join the prospects with the features, similarly PWM with the features.
+
+    # pick which feature columns to keep (or keep all numeric)
+    # here we assume your feature columns are stored in config or we discover them dynamically
+    feature_cols = cfg["features"]["all_numeric_cols"]
+
+    df_prospects = df_prospects_base.join(df_features.select("hh_id_in_wh", *feature_cols),
+                                          on="hh_id_in_wh",
+                                          how="left")
+
+    df_pwm = df_pwm_base.join(df_features.select("hh_id_in_wh", *feature_cols),
+                              on="hh_id_in_wh",
+                              how="left")
+
+    # 4) We want to gather cluster IDs. We'll do distinct to avoid duplicates:
+    cluster_ids = [row["cluster_id"] for row in df_prospects.select("cluster_id").distinct().collect()]
+
+    # 5) Build a final DataFrame of prospects with an "insight" column
+    #    We'll do it cluster by cluster, then union results.
+
+    union_df = None
+
+    for c_id in cluster_ids:
+        # a) Train a random forest to distinguish cluster c_id from other clusters
+        feature_importances = train_cluster_insight_model(
+            df=df_prospects,
+            cluster_col="cluster_id",
+            cluster_id=c_id,
+            feature_cols=feature_cols,
+            label_col="label"
+        )
+        # top 5
+        top_5_features = [fp[0] for fp in feature_importances[:5]]
+
+        # b) Compute mean/std for cluster c_id from the PWM data
+        stats_dict = compute_cluster_mean_std(
+            df=df_pwm,
+            cluster_id=c_id,
+            pwm_cluster_col="cluster_id",
+            feature_cols=top_5_features
+        )
+
+        # c) For each prospect in this cluster, build an insight string
+        #    We'll turn the Spark DF into an RDD or do a UDF to build the string.
+        #    Let's do it with a UDF here.
+
+        # UDF approach
+        from pyspark.sql.types import StringType
+        from pyspark.sql.functions import udf
+
+        # We need to pass the top_5_features + stats_dict in some way.
+        # Because stats_dict is a Python object, we can broadcast it or store it in the driver.
+        # Then for each row, we build a dictionary { feat -> value } for that row,
+        # call generate_insight_string.
+        # We'll also store top_5_features as a broadcast variable.
+
+        bc_stats_dict = spark.sparkContext.broadcast(stats_dict)
+        bc_top_features = spark.sparkContext.broadcast(top_5_features)
+
+        @udf(StringType())
+        def insight_udf(*cols):
+            # The first len(top_5_features) columns correspond to the top_5_features
+            # Build row_values dict, then call generate_insight_string
+            row_values = {}
+            for i, feat in enumerate(bc_top_features.value):
+                row_values[feat] = cols[i] if cols[i] is not None else 0.0
+
+            return generate_insight_string(
+                top_features=[(f, 0.0) for f in bc_top_features.value],  # importance not used in text
+                row_values=row_values,
+                cluster_stats=bc_stats_dict.value
+            )
+
+        # We'll select the columns for the top_5_features in the correct order
+        feature_cols_expr = [F.col(f) for f in top_5_features]
+        df_cluster = (
+            df_prospects
+            .filter(F.col("cluster_id") == c_id)
+            .select(
+                "*",  # keep existing columns
+                insight_udf(*feature_cols_expr).alias("insight")
+            )
+        )
+
+        # d) Union into union_df
+        if union_df is None:
+            union_df = df_cluster
+        else:
+            union_df = union_df.union(df_cluster)
+
+    # 6) Now union_df has all prospects, with an "insight" column for each cluster
+    #    We can finalize columns. E.g. we only want:
+    #    [hh_id_in_wh, similarity_score, distance_to_center, prospect_segment, cluster_id, insight, business_date]
+
+    final_cols = [
+        "hh_id_in_wh",
+        "similarity_score",
+        "distance_to_center",
+        "prospect_segment",
+        "cluster_id",
+        "insight",
+        "business_date"
+    ]
+    df_insight = union_df.select(*[F.col(c) for c in final_cols])
+
+    # 7) Write final result to a table or do whatever is needed
+    # e.g. df_insight.write.saveAsTable("DM_WM_DEV.prospect_insights", mode="overwrite")
+
+    spark.stop()
+
+
+if __name__ == "__main__":
+    main()
+
+
+
+
 # insight_pipeline.py
 # Placed in private_wealth_retention/consumer_prospecting/model/
 
