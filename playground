@@ -66,8 +66,9 @@ def main():
 
     union_df = None
 
+
     for c_id in cluster_ids:
-        # a) Train a random forest to distinguish cluster c_id from other clusters
+        # a) Train a mini “cluster vs. rest” RF to get top 5 features
         feature_importances = train_cluster_insight_model(
             df=df_prospects,
             cluster_col="cluster_id",
@@ -75,10 +76,9 @@ def main():
             feature_cols=feature_cols,
             label_col="label"
         )
-        # top 5
         top_5_features = [fp[0] for fp in feature_importances[:5]]
 
-        # b) Compute mean/std for cluster c_id from the PWM data
+        # b) Compute mean/std for PWM in this cluster
         stats_dict = compute_cluster_mean_std(
             df=df_pwm,
             cluster_id=c_id,
@@ -86,53 +86,47 @@ def main():
             feature_cols=top_5_features
         )
 
-        # c) For each prospect in this cluster, build an insight string
-        #    We'll turn the Spark DF into an RDD or do a UDF to build the string.
-        #    Let's do it with a UDF here.
+        # c) Filter prospects in cluster c_id
+        df_cluster = df_prospects.filter(F.col("cluster_id") == c_id)
 
-        # UDF approach
-        from pyspark.sql.types import StringType
-        from pyspark.sql.functions import udf
+        # d) Collect them to the driver
+        local_rows = df_cluster.collect()  # <--- Avoiding UDF, but watch memory usage
 
-        # We need to pass the top_5_features + stats_dict in some way.
-        # Because stats_dict is a Python object, we can broadcast it or store it in the driver.
-        # Then for each row, we build a dictionary { feat -> value } for that row,
-        # call generate_insight_string.
-        # We'll also store top_5_features as a broadcast variable.
-
-        bc_stats_dict = spark.sparkContext.broadcast(stats_dict)
-        bc_top_features = spark.sparkContext.broadcast(top_5_features)
-
-        @udf(StringType())
-        def insight_udf(*cols):
-            # The first len(top_5_features) columns correspond to the top_5_features
-            # Build row_values dict, then call generate_insight_string
+        # e) Build new rows with an "insight" column
+        new_data = []
+        for row in local_rows:
+            row_dict = row.asDict()  # convert Row to dict
+            # Build row_values for top features
             row_values = {}
-            for i, feat in enumerate(bc_top_features.value):
-                row_values[feat] = cols[i] if cols[i] is not None else 0.0
+            for feat in top_5_features:
+                row_values[feat] = row_dict.get(feat, 0.0) or 0.0
 
-            return generate_insight_string(
-                top_features=[(f, 0.0) for f in bc_top_features.value],  # importance not used in text
+            # Generate the insight string
+            # (We don't need the actual feature importances for the string, just names)
+            top_feats_stub = [(f, 0.0) for f in top_5_features]
+            insight_str = generate_insight_string(
+                top_features=top_feats_stub,
                 row_values=row_values,
-                cluster_stats=bc_stats_dict.value
+                cluster_stats=stats_dict
             )
 
-        # We'll select the columns for the top_5_features in the correct order
-        feature_cols_expr = [F.col(f) for f in top_5_features]
-        df_cluster = (
-            df_prospects
-            .filter(F.col("cluster_id") == c_id)
-            .select(
-                "*",  # keep existing columns
-                insight_udf(*feature_cols_expr).alias("insight")
-            )
+            # Add the new column
+            row_dict["insight"] = insight_str
+            new_data.append(row_dict)
+
+        # f) Build a new Spark DF with the “insight” column
+        #    We'll just adapt df_cluster's schema + add "insight".
+        #    Note: if "insight" doesn't exist in the old schema, we must add it.
+        new_schema = df_cluster.schema.add(
+            StructField("insight", StringType(), True)
         )
+        df_cluster_with_insight = spark.createDataFrame(new_data, schema=new_schema)
 
-        # d) Union into union_df
+        # g) Union into union_df
         if union_df is None:
-            union_df = df_cluster
+            union_df = df_cluster_with_insight
         else:
-            union_df = union_df.union(df_cluster)
+            union_df = union_df.union(df_cluster_with_insight)
 
     # 6) Now union_df has all prospects, with an "insight" column for each cluster
     #    We can finalize columns. E.g. we only want:
