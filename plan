@@ -1,28 +1,11 @@
-Below is a concise **one-slide** summary you can use in a presentation. Focus on your **feature importance** logic and **insight generation** flow. Adapt any visuals or bullet points as you see fit:
+**Possible 2-Minute Spoken Script**
 
----
-
-## **Automated Feature Selection & Insight Generation**
-
-**1. Feature Importance**  
-- **Goal**: Automatically determine which features best separate PWM (Private Wealth Management) from Consumer.  
-- **Process**:  
-  1. Train a **Spark ML** RandomForest on all features.  
-  2. Compute **feature importances**.  
-  3. **Save top-N** features to a data-lake table, ensuring future runs only use the most relevant columns.
-
-**2. Prospect Clustering**  
-- **K-Means** on PWM clients (using top-N features).  
-- Assign each new prospect to the **closest** PWM cluster, capturing **similarity** and **distance** metrics.  
-- Minimal final output for each prospect: `cluster_id`, `similarity_score`, `distance_to_center`, etc.
-
-**3. Insight Generation**  
-- **Model Per Cluster**: For each cluster, train a small “cluster vs. rest” RandomForest to find **which features** most distinguish that cluster’s prospects.  
-- **Mean ± 2 Std Range**: For PWM in that cluster, calculate each feature’s **mean** and **standard deviation**.  
-- **Insight String**: For each prospect in the cluster, capture the top 5 feature values and compare them to the cluster’s `(mean ± 2*std)` range.  
-  - Example output: `"Feature: bal_amt_sum = 10k, cluster mean = 12k, range = [8k, 16k]"`  
-- Final result includes `hh_id_in_wh, similarity_score, distance_to_center, prospect_segment, cluster_id, insight, business_date`.
-
-**Outcome**  
-- **Dynamic** top-feature selection ensures the pipeline is always focused on the most predictive columns.  
-- **Insight strings** provide clear, cluster-specific explanations for each prospect, improving transparency and assisting business teams with actionable knowledge.
+> “Here’s a quick overview of our latest progress:
+> 
+> First, I added a **feature importance** step to automatically select the top predictive features. This uses a **Spark ML RandomForest** that ranks all candidate features for distinguishing PWM from Consumer. We then save the top features in a data-lake table, so each new run of the pipeline only relies on the best columns.
+> 
+> Next, we updated the **prospecting workflow** to cluster clients on these selected features—no more manual feature list. With each run, it’s dynamically updated based on whichever columns are currently most relevant.
+> 
+> Finally, I introduced an **insight generation** post-processing stage. For each cluster, we train a small “cluster vs. rest” model to find the key features that matter most for that cluster, compute mean and standard-deviation stats for the existing PWM in it, and then generate a textual insight for each prospect comparing their feature values to the cluster’s norm. This ends up in one final table showing exactly why a prospect was placed in a particular cluster and how they differ. 
+> 
+> All told, we now have an **end-to-end** automated flow—from feature selection to clustering and detailed insights—that should help both data teams and business stakeholders quickly see what drives each prospect’s assignment.”
