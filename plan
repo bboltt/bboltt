@@ -1,124 +1,28 @@
-This year, I demonstrated consistent excellence by successfully delivering multiple high-impact projects that exceeded expectations. I led the completion of the RCLliq NBS 2.0 project, ensuring it passed the MRMV review in Q1. As the main developer, I built and implemented the prospecting pipeline for the "Introduce to Wealth Management" project, directly supporting the organization's strategic goals. My contributions to the Fraud In-Clearing project, including EDA and model retraining, further showcased my ability to enhance operational effectiveness and deliver measurable results.
+Below is a concise **one-slide** summary you can use in a presentation. Focus on your **feature importance** logic and **insight generation** flow. Adapt any visuals or bullet points as you see fit:
 
-I embraced opportunities for continuous improvement by participating in SageMaker testing for disaster recovery and test environments, mastering AWS workflows, and building neural network models using TensorFlow. Additionally, I collaborated with the Machine Mavericks work group to develop a multi-variable time series model for liquidity prediction, demonstrating my commitment to innovation.
+---
 
-Collaboration remained a core focus as I engaged with cross-functional teams across Wealth, RCLliq, and Fraud projects. By presenting internal demos and milestone updates to stakeholders, I ensured transparency and alignment while fostering a culture of shared learning. These efforts reflect my dedication to driving both individual and team success.
+## **Automated Feature Selection & Insight Generation**
 
+**1. Feature Importance**  
+- **Goal**: Automatically determine which features best separate PWM (Private Wealth Management) from Consumer.  
+- **Process**:  
+  1. Train a **Spark ML** RandomForest on all features.  
+  2. Compute **feature importances**.  
+  3. **Save top-N** features to a data-lake table, ensuring future runs only use the most relevant columns.
 
-Week 1-2 (Lead DS & DS #2):
+**2. Prospect Clustering**  
+- **K-Means** on PWM clients (using top-N features).  
+- Assign each new prospect to the **closest** PWM cluster, capturing **similarity** and **distance** metrics.  
+- Minimal final output for each prospect: `cluster_id`, `similarity_score`, `distance_to_center`, etc.
 
-Define Targets:
-Client-level attrition: Zero revenue generated in a set time horizon (e.g., next quarter).
-Product-level attrition: Discontinuation or zero usage of a specific product line.
-Data Retrieval & Quick Prep:
-Acquire necessary data: transaction history, client profiles, product usage logs, historical interventions (when, what kind), relationship manager interactions.
-Create initial joined datasets keyed by client and product.
-Intervention Bias Assessment:
-Identify what interventions were applied historically and when.
-Check if older (pre-intervention) or control-like data exist.
-Prepare flags/indicators for interventions.
-Week 3 (DS #3 & Lead DS):
+**3. Insight Generation**  
+- **Model Per Cluster**: For each cluster, train a small “cluster vs. rest” RandomForest to find **which features** most distinguish that cluster’s prospects.  
+- **Mean ± 2 Std Range**: For PWM in that cluster, calculate each feature’s **mean** and **standard deviation**.  
+- **Insight String**: For each prospect in the cluster, capture the top 5 feature values and compare them to the cluster’s `(mean ± 2*std)` range.  
+  - Example output: `"Feature: bal_amt_sum = 10k, cluster mean = 12k, range = [8k, 16k]"`  
+- Final result includes `hh_id_in_wh, similarity_score, distance_to_center, prospect_segment, cluster_id, insight, business_date`.
 
-Lightweight EDA on Targets:
-Quickly verify the target variable distributions, attrition rates, and basic segmentations.
-Ensure data consistency and handle obvious missing values.
-Define Preliminary Triggers (Domain-Driven):
-Brainstorm with domain experts: what events are known or suspected triggers? Examples:
-Significant withdrawal event (e.g., >30% AUM in 2 weeks)
-Relationship Manager (RM) change event
-Fee increase or product price adjustment event
-Missed scheduled advisory meeting event
-Start coding these events as Boolean flags or counters in the dataset.
-Week 4 (DS #2 & DS #3):
-
-Initial Baseline Model (Attrition Prediction):
-Train a simple baseline model (e.g., logistic regression or simple gradient boosting) to predict attrition.
-Integrate intervention indicators as features.
-Continuous EDA:
-Use model residual analysis to refine data understanding. Identify patterns in clients the model misclassifies.
-This EDA will guide feature refinement and possible event trigger adjustments.
-Deliverables End of Month 1:
-
-Well-defined attrition targets.
-Initial triggers identified from domain knowledge (event-based, not just data-driven).
-Baseline model and preliminary understanding of intervention bias.
-Month 2: Refine Modeling, Introduce Causal/Uplift Methods, Event Trigger Validation
-
-Week 1-2 (Lead DS & DS #2):
-
-Address Intervention Bias:
-Implement a two-stage modeling approach or uplift modeling:
-First model: Probability of intervention given client characteristics (Propensity Model).
-Second model: Adjust attrition predictions by factoring out intervention likelihood (Incorporate inverse probability weighting or uplift modeling techniques).
-Refine Triggers with Statistical Tests:
-For each candidate event-based trigger, measure how often it precedes attrition in the historical data.
-Test trigger significance by comparing attrition rates in clients who experienced the event vs. a matched control who didn’t. This moves beyond raw feature importance and validates triggers as meaningful events.
-Week 3 (DS #3 & ML Engineer):
-
-Iterative Model Improvement:
-Incorporate new features derived from triggers: for instance, “Number of large withdrawals in last 30 days” or “RM changes in last quarter.”
-Retrain the model with adjusted datasets where intervention effects are partially neutralized.
-Model Evaluation & Early Validation:
-Use AUC, Precision@TopDecile, and Recall as primary metrics.
-Begin ranking clients and products by risk score and compare to baseline.
-Continuous EDA:
-Deep-dive into clients flagged by triggers and those missed by the model.
-Refine the event definitions if needed (e.g., adjusting the withdrawal percentage threshold).
-Week 4 (Lead DS & DS #3):
-
-Trigger Documentation & Rule Refinement:
-Clearly document each validated trigger as a rule:
-“If a client experiences an RM change event followed by a large outflow within X days, increase churn risk score.”
-Begin drafting how these triggers integrate as a retrieval mechanism: Identify clients meeting trigger conditions, then run the ranking model over them.
-Deliverables End of Month 2:
-
-A refined model that accounts for intervention bias using causal adjustments.
-A validated set of event-based triggers correlated with attrition.
-Improved model performance metrics and a set of trigger rules ready for integration.
-Month 3: Integration of Triggers and Model, Final Validation, Pre-Deployment Planning
-
-Week 1-2 (DS #2 & ML Engineer):
-
-Integration of Retrieval (Triggers) + Ranking (Model):
-Implement a pipeline:
-Step 1 (Retrieval): Flag clients who hit any event-based triggers.
-Step 2 (Ranking): For all clients, including triggered ones, run the refined model to produce a churn probability and rank them.
-Back-Testing and Validation:
-Back-test the integrated approach on historical holdout data.
-Compare performance against the old retention system in terms of early detection and precision in identifying at-risk clients/products.
-Week 3 (Lead DS & DS #3):
-
-Final Model Tuning & Documentation:
-Fine-tune hyperparameters.
-Finalize the set of triggers and their definitions.
-Document the model pipeline, data sources, and assumptions made to address intervention bias.
-Continuous EDA:
-Validate final model outputs and triggers with relationship managers and product specialists.
-Check stability: Are triggers consistently meaningful over different time periods?
-Week 4 (All DS & ML Engineer):
-
-Pre-Deployment Planning:
-Outline API design and scoring pipelines.
-Ensure data flows and triggers can be updated regularly (weekly or monthly).
-Discuss monitoring strategies for post-deployment: model drift detection, ongoing intervention bias checks.
-Knowledge Transfer & Handover:
-Create clear documentation for stakeholders.
-Present final results to management, highlighting how intervention bias was mitigated and how triggers can inform proactive retention actions.
-Deliverables End of Month 3:
-
-Final integrated model (retrieval via triggers + ranking model).
-Detailed documentation of triggers as event-based rules.
-Pre-deployment plan and roadmap for production integration.
-Roles & Responsibilities
-Lead Data Scientist (You):
-Overall project management and strategic decisions.
-Leading the approach to intervention bias adjustment and final validation steps.
-Data Scientist #2:
-Hands-on feature engineering, preliminary modeling, and uplift/causal modeling integration.
-Validate triggers statistically and integrate them into the model.
-Data Scientist #3:
-Continuous targeted EDA throughout sprints.
-Assist in refining triggers, conducting back-tests, and fine-tuning hyperparameters.
-Machine Learning Engineer:
-Ensure data processing pipelines are efficient.
-Assist in model integration, building scoring pipelines, and setting up pre-deployment frameworks.
+**Outcome**  
+- **Dynamic** top-feature selection ensures the pipeline is always focused on the most predictive columns.  
+- **Insight strings** provide clear, cluster-specific explanations for each prospect, improving transparency and assisting business teams with actionable knowledge.
