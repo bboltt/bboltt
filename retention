@@ -1,0 +1,134 @@
+Based on the **`run_postprocess_fusion.py`** code (the “postfusion” step) plus everything we see in your screenshots, here’s what is happening **after** the initial prediction DataFrame is created. In other words, once the RandomForest (or other) model scores are written out, this `main()` function in `run_postprocess_fusion.py` (often called via something like `postfusion(spark)`) does the **final merge** of the new predictions with other “retention” outputs and writes **two final tables**.
+
+---
+
+## High‐Level Purpose
+
+**The purpose of postfusion** is to:
+1. Pull in the **client** (a.k.a. “retention”) model’s post‐processed output (from a separate table).
+2. Pull in the **trust** model’s post‐processed output (the predictions you just generated).
+3. Validate the two sets of data are within a small date gap (for example, they check to ensure the difference in `feature_end_date` is under 7 days).
+4. **Combine** them into a unified final DataFrame that includes columns from both the retention side and trust side (e.g., “risklevel,” “model,” “reasonCode,” “client_id,” etc.).
+5. Possibly compute or rename columns so both are in a common format.  
+6. Write out **two** final “fusion” tables to Hive:
+    - `retention_fusion_table`
+    - `retention_reason_fusion_table`
+
+These final fusion tables appear to be the “consumption” outputs for other teams or dashboards.  
+
+---
+
+## Main Steps Inside `run_postprocess_fusion.py`
+
+1. **Initialize Spark & Load Config**  
+   - The script calls a standard `generate_spark_instance(...)` method, sets up memory/CPU, etc.
+   - Reads in two config files:
+     - `cfg_ret = get_config(model_ret)` for the *older retention model*
+     - `cfg_trust = get_config(model_trust)` for the *trust model*
+   - Also checks environment variables like `VERSION`, sets `postfix = os.getenv("VERSION", "someversion")`.
+
+2. **Get Table Names**  
+   - Reads from `cfg_ret["paths"]["retention_table"]`, `cfg_ret["paths"]["retention_reason_table"]`  
+   - Reads from `cfg_trust["paths"]["retention_table"]` (which is ironically the “trust” retention or trust “prediction” table) plus a “reason” table.  
+
+3. **Find the Most Recent Partitions**  
+   - They call a helper function named `get_most_recent_partition(spark, schema_str, table_str)` to figure out the latest partition to use from both the older retention table and the trust table.  
+   - So effectively, they do something like:
+     ```python
+     retention_partition = get_most_recent_partition(spark, schema, ret_table_name)
+     trust_partition = get_most_recent_partition(spark, schema, trust_ret_table_name)
+     ```
+   - Then they run SQL queries to retrieve data from the partitions corresponding to those dates.
+
+4. **Check the Date Difference**  
+   - After reading each table, they extract a column called `feature_end_date` from both. The code does something like:
+     ```python
+     date_delta = abs(
+       datetime.strptime(ret_date_str, "%Y-%m-%d") -
+       datetime.strptime(trust_date_str, "%Y-%m-%d")
+     )
+     assert date_delta.days < 7
+     ```
+   - This is to ensure the two data sets (the older “retention” model and your new “trust” model) were scored on roughly the same timeframe.
+
+5. **Combine the Two Tables**  
+   - The snippet you pasted shows lines like:
+     ```python
+     ret_table_all = (
+         retention_table.withColumn("model", f.lit("client"))
+         .join( 
+             trust_ret_table.drop("ar_id"),  # maybe they rename or remove the old “ar_id”
+             ["lp_id"], 
+             "left" 
+         )
+         .withColumn("risklevel", f.lit("trust_acct"))...
+         # ... selects columns from both ...
+     )
+     .distinct()
+     .drop("rundatetime")
+     # etc. ...
+     .withColumn("rundatetime", f.date_format(f.current_timestamp(), "yyyy-MM-dd"))
+     .withColumn("commit_hash", lit(str(postfix)))
+     .select(...)
+     ```
+   - Essentially they do a **left join** on `["lp_id"]` (and maybe `ar_id` if needed, or they skip `ar_id` from one side).  
+   - Then they pick which columns they want from each side. Usually these columns are something like:
+     - **From the client (retention) table**: `risklevel, status, date, lp_id, reasoncodeshort, commit_hash, feature_end_date, client_id, etc.`
+     - **From the trust table**: `trust_risklevel, trust_status, etc.`  
+   - After the join, they unify them into a single record per `lp_id` (or per row). They do some logic for columns like “status” or “model.”  
+   - You can see lines that do `withColumn("model", ...)` and a big `when(...)` block that merges the “risklevel” from both sides.  
+
+6. **Write Out the “Fusion” Tables**  
+   - Once the combined DataFrame is created (named `ret_table_all_combined` or similar), the code writes it to:
+     ```python
+     retention_fusion_table_name = cfg_trust["paths"]["retention_fusion_table"]
+     ...
+     write_hive_table_from_schema(
+       ret_table_all_combined,
+       schema_name,
+       retention_fusion_table_name,
+       table_schema,
+       "overwrite"
+     )
+     ```
+   - Then does the same for the reason table:
+     ```python
+     write_hive_table_from_schema(
+       ret_reason_table,
+       schema_name,
+       retention_reason_fusion_table_name,
+       table_schema,
+       "overwrite"
+     )
+     ```
+   - So you end up with two final Hive tables. Often, the reason table is a separate detail table that explains the “why” (the reason codes).  
+
+---
+
+## Putting It All Together
+
+So in the overall pipeline:
+
+1. You run your normal data prep, generate features, and load them into Spark.  
+2. You load the Spark ML model and get predictions (the “trust model” or “TBM” model).  
+3. You write out those predictions into some table—for instance, `schema.trust_ret_table_name`.  
+4. Then you call this **`postfusion`** step, which:
+   - Also reads the older “retention” model’s final output from a different table.  
+   - Ensures both data sets are for the same date or within a few days.  
+   - Joins them, merges columns, standardizes naming.  
+   - Writes a single “fusion” table (and a companion “fusion reason” table) so that downstream consumers only need to query one set of results instead of two separate tables.
+
+Essentially, **the next step after your new predictions** is to run this “fusion” step so the final pipeline has the combined outputs. If you replace or redevelop the trust prediction piece, you need to ensure the final output (columns and partition fields) lines up with what `postfusion` expects—i.e., that it still has `lp_id`, `feature_end_date`, `risklevel`, or any other fields the join logic uses.  
+
+---
+
+### What You Need to Double‐Check
+
+- **Are your new trust predictions** still writing to the same table that `postfusion` is reading from?  
+- **Does your new table** have the same columns (`lp_id`, `risklevel`, maybe `ar_id`) that `postfusion` is joining on?  
+- **Are you still populating `feature_end_date`** so that the date difference check passes?  
+- **Do you still output the “rundatetime”** so that the partition logic can find the latest partition?  
+
+As long as your new code continues to produce a DataFrame/table with the same schema, the `run_postprocess_fusion.py` script will work as before.  
+
+If you have more questions on specific pieces of that logic, just let me know!
