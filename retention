@@ -1,3 +1,163 @@
+Below is a high‐level walk‐through of **`run_postprocess.py`** (the code you showed that is invoked from `run_predict.py` via `perform_postprocess`), plus how it connects to or differs from **`run_postprocess_fusion.py`**. By seeing them side by side, you can understand:
+
+1. **What** “postprocess” does with the raw model predictions.  
+2. **Why** “postfusion” then needs to merge these post‐processed outputs with data from another model.
+
+---
+
+## 1. Overview of `run_postprocess.py`
+
+When `run_postprocess.py` is called, it expects:
+
+- A Spark session (`spark`)  
+- A Pandas DataFrame of predictions (`predictions`)  
+- A Pandas DataFrame of features (`features`), usually used for reason‐code insights and suppression logic  
+- A start/end date specifying the date range for the final output
+
+It then **combines**, **enriches**, and **standardizes** these predictions into final tables that get written to Hive. Let’s break it down step by step:
+
+### Step A: Load Configuration & Variables
+
+- The function does:
+  ```python
+  cfg = get_config(model_trust, "conf.yaml")
+  environment = os.getenv("SQL_ENVIRONMENT", "dev")
+  ...
+  # it grabs many keys, e.g. threshold, columns, etc.
+  ```
+  so it knows:
+
+  - Which columns are “customer ID” vs. “AR ID,” etc.
+  - Which threshold or filters to apply (e.g., a “score_threshold”).
+  - Where to write the output (Hive table names in `cfg["paths"]`).
+
+### Step B: Merge Predictions with Features / Reason Codes
+
+1. **Merge predictions & features**  
+   ```python
+   model_output = predictions.merge(features, on=["ar_id", "lp_id"], how="inner")
+   ```
+   - Ensures the final data has both the “raw” model scores (e.g. `attrition_prob`, or “risklevel”) plus supporting columns from the feature set (like reason codes or other insights).
+
+2. **Add Current Revenue**  
+   - The code references `get_curr_revenue(...)` or something similar if it needs to incorporate a revenue column. (From the screenshot, it’s not 100% certain, but you see lines like `model_output["REVENUEAtRisk"]` or similar.)
+   - This merges in revenue data so we can know how much money is at stake for a high‐risk client, etc.
+
+3. **Get Additional IDs** (e.g., `client_id`)  
+   ```python
+   client_id_df = get_client_ids(spark)
+   model_output = model_output.merge(client_id_df, how="left", on="lp_id")
+   ```
+   - So the final table has all relevant IDs: `ar_id`, `lp_id`, `client_id`, etc.
+
+### Step C: Apply Classification & Suppression Logic
+
+1. **Risk Level**  
+   - The code lines show logic like:  
+     ```python
+     model_output.loc[model_output["risklevel"]=="high", ...]
+     ```
+     or something similar. Some rows might be labeled “High,” “Low,” or “Medium” risk.  
+
+2. **Suppression**  
+   - The code calls `suppress_pred(model_output, deceased_indicator, end_date, tenure_years, etc.)`.
+   - That function typically removes or modifies rows that shouldn’t be flagged (e.g., if the customer is deceased or if the account is brand new, etc.).
+
+3. **Update “Status”**  
+   - For instance, if `risklevel=="low"`, the script sets:
+     ```python
+     model_output["status"] = "No Action Needed"
+     ```
+     else it might remain “unaddressed” or something else.  
+
+4. **Add Final Timestamps / Columns**  
+   - The script sets something like:
+     ```python
+     model_output["date"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+     model_output["rundatetime"] = date_format(f.current_timestamp(),"yyyy-MM-dd")
+     model_output["feature_end_date"] = end_date
+     model_output["commit_hash"] = postfix
+     ```
+   - This ensures each row has a standardized set of audit/tracking columns.
+
+### Step D: Format & Write Output to Hive
+
+- The script transforms `model_output` into a Spark DataFrame:
+  ```python
+  df_ret_model_op = spark.createDataFrame(model_output)
+  ```
+  - Then it normalizes column types (integer vs. string, etc.).
+  - Possibly merges in reason codes again:
+    ```python
+    df_retention_reason = generate_reason_table_trust(df_retention, "reasonCode")
+    df_retention = df_retention.join(df_retention_reason, ...)
+    ```
+  - Finally, it calls:
+    ```python
+    write_hive_table_from_schema(df_retention, schema_name, trust_ret_table_name, table_schema, "overwrite")
+    ```
+    and similarly for a “reason” table:
+    ```python
+    write_hive_table_from_schema(df_retention_reason, schema_name, trust_ret_reason_table_name, table_schema, "overwrite")
+    ```
+- End result: **Two** tables:
+  1. `trust_ret_table_name` – the main retention/prediction output  
+  2. `trust_ret_reason_table_name` – reason code details
+
+---
+
+## 2. Relationship to `run_postprocess_fusion.py`
+
+- Once `run_postprocess.py` has created those final trust model tables (with columns like `risklevel, date, lp_id, ar_id, reasonCode, feature_end_date, etc.`), **another script** (`run_postprocess_fusion.py`) **picks them up**.
+- In `postfusion`, you see the pipeline do something like:
+  1. **Read the newly created trust retention table** (the one you wrote out above).  
+  2. **Read** a “client retention” or older retention model table.  
+  3. **Compare** their `feature_end_date` to ensure they’re close in time.  
+  4. **Join** them on something like `lp_id` or `ar_id` so you have a single row that includes both “client model” columns and “trust model” columns.  
+  5. Potentially unify statuses or risk levels.  
+  6. Write out the final “fusion” tables, typically called something like `retention_fusion_table` or `retention_reason_fusion_table`.
+
+So effectively:
+
+1. **`run_postprocess.py`**:  
+   - Takes *one* model’s raw predictions (the “trust” model in this case).  
+   - Cleans them up, merges reason codes, sets statuses, writes a well‐structured output.  
+
+2. **`run_postprocess_fusion.py`**:  
+   - Takes *both* (a) that newly written “trust” output, and (b) the older or client retention output.  
+   - Merges them, so you get a single final data set that has “trust” results and “client” results side by side.  
+   - Produces final “fusion” tables for consumption.
+
+Hence, if you replace or update the “predict” step or the “postprocess” step, you just need to be sure you keep the same **final table structure** that `postprocess_fusion` expects—particularly the columns used for the join (like `lp_id`) and the date field (like `feature_end_date`), so that `postfusion` can still pick it up without errors.
+
+---
+
+### Final Takeaways
+
+- **`run_postprocess.py`**: 
+  - Merges your raw model’s predictions with extra data (features, reason codes, client IDs).  
+  - Applies filters (suppression) and sets “status” or “risklevel.”  
+  - Writes final tables to Hive for the trust model.
+
+- **`run_postprocess_fusion.py`**:
+  - Reads that “trust” table (plus a “reason” table) and also a “client retention” table from a prior pipeline.  
+  - Joins or “fuses” them so that you end up with a single, combined final dataset.
+
+Once you know these steps, you can safely modify or redevelop the actual scoring code so long as you:
+
+- **Still produce** columns like `lp_id`, `risklevel`, `reasonCode`, `feature_end_date`, etc.
+- **Maintain** the same partition or date structure needed by `postfusion`.
+- Write your final DataFrame to the same Hive location (or update config accordingly).
+
+That way, `postfusion` will continue to work without needing changes.
+
+
+
+
+
+
+
+
 Based on the **`run_postprocess_fusion.py`** code (the “postfusion” step) plus everything we see in your screenshots, here’s what is happening **after** the initial prediction DataFrame is created. In other words, once the RandomForest (or other) model scores are written out, this `main()` function in `run_postprocess_fusion.py` (often called via something like `postfusion(spark)`) does the **final merge** of the new predictions with other “retention” outputs and writes **two final tables**.
 
 ---
