@@ -1,80 +1,110 @@
-Below is a sample “Chapter 7: Outcomes Analysis” section, incorporating the *highlighted requirements* and referencing your **lift (gains) analysis** on out‐of‐time (OOT) data for both the **new model** and the **old model**. I’ve preserved a structure for **7.1 (Assumption Testing)** and **7.2 (Performance Testing)**. Since you asked not to assume facts, I’ve added suggestions or placeholders (in italics) where you might insert specific numerical improvements or more details. Please revise these placeholders as appropriate.
+Below is a **final, formal writeup** of the **Model Implementation** chapter in the **new format** you provided. It incorporates the same implementation details used by the old model (since the new model’s data pipeline and processes remain unchanged), restructured according to the updated headings and requirements.
 
 ---
 
-# 7. Outcomes Analysis
+# 8. Model Implementation
 
-In the development process, the model owner should ensure the model undergoes **extensive outcomes analysis** to verify that it behaves as expected, meets any methodological assumptions, and performs effectively on relevant data. This chapter documents the main validation checks for assumptions and the performance testing.
+This chapter explains how the updated Inclearing Fraud Model (Version 3) is deployed and integrated within the organization’s production environment, including data sources, transformations, and the reporting mechanism for fraud risk scores.
 
-## 7.1. Assumption Testing
+## 8.1. Summary of Model Implementation
 
-Since this project’s core predictive model is a non‐parametric GBT classifier, it does not rely on classical linear assumptions (e.g., normal residuals or homoskedasticity). Tree‐based methods naturally handle a wide range of feature distributions and correlation structures, so formal tests for multicollinearity (e.g., Variance Inflation Factors), autocorrelation (Durbin‐Watson), and stationarity (cointegration) are **not** strictly required for model validity.
+The Inclearing Fraud Model V3 is implemented as part of the **Financial Crimes Non‐Card Transaction** fraud detection pipeline. It uses **PySpark** on **[CDSW / Spark cluster / internal big data platform]** to generate daily fraud scores for each inclearing transaction. These scores feed into the **Fraud Operations** rules engine, enabling real‐time or near‐real‐time alerts for potential fraudulent checks.
 
-Nonetheless, the data was examined to confirm there were no evident structural anomalies:
-- **Feature Distributions** were checked for extreme skew. No transformations were deemed necessary.  
-- **Temporal Drift** was monitored by splitting the dataset into distinct in‐time and out‐of‐time segments. The model’s stable performance across these segments (detailed in Section 7.2) indicates no major temporal biases.  
+- **Application / System**:  
+  - The model’s output is ingested into **Detica** (the downstream case management system), where Fraud Operations reviews high‐risk items.  
+- **Code Platform and Prediction Flow**:  
+  - The scoring code is stored in **[Bitbucket / GitHub / internal repository]**.  
+  - During each production cycle, the pipeline reads inclearing transactions from the **Data Lake** (same as previous model version), applies the GBT model to compute a fraud likelihood score, and writes back the scored data to a **production table** for consumption by downstream applications.
 
-No additional parametric assumptions apply. Therefore, no assumption violations were observed, and no further tests were required.
-## 7.2. Performance Testing
+Because the model architecture (a Gradient Boosted Classifier) and data ingestion pipeline are the same as in the previous version, minimal adjustments were needed beyond retraining on updated historical data.
 
-Performance testing verifies that the model’s **predictions** align with the **actual outcomes** on both in‐time and out‐of‐time (OOT) data. In this project, we evaluated performance using:
+## 8.2. Production Data Sources, Preparation, and Transformations
 
-1. **Rank‐Ordering Ability** (via Gains Chart or Lift Chart)  
-2. **Comparison to Previous (Old) Model**  
-3. **Out‐of‐Time Dataset Evaluation**  
-4. *(Optional)* **Sensitivity Testing** or “stress tests” on the model input ranges
+### 8.2.1. Data Pipeline
 
-### 7.2.1. Gains / Lift Charts
+1. **Implementation/Prediction Pipeline**  
+   - The system extracts daily inclearing transactions from **`dm_fraud_detection.inc_frd_<...>`** (or equivalent) within the Data Lake.  
+   - A PySpark job transforms the raw data, applies feature engineering steps (similar to those used in model development), and feeds the resulting features into the GBT model object.  
+   - The model scores each transaction, outputting the predicted probability of fraud (i.e., fraud score).
 
-A **gains chart** (or “lift chart”) compares how well the model discriminates between “good” transactions (non‐fraud) and “bad” transactions (fraud) at various score cutoffs. For each decile (or percentile), we measure how many fraud cases are captured relative to a random baseline.
+2. **Reference to Applicable Code**  
+   - The Spark job is orchestrated via **[Airflow / internal scheduler]**.  
+   - Code is tracked in **Bitbucket** under the repository **`<repo_name>`**, ensuring version control for any changes to data transformations.
 
-- We produced a gains chart for the **new GBT model** and the **old model**, both on an **out‐of‐time (OOT) dataset** to assess true generalization ability.  
-- The *OOT data* spanned *[insert time range]*, which was not used in training.  
-- In the attached spreadsheet, columns show cumulative “goods” and “bads,” total amounts, the fraud rate by decile, and so on. The **score** column indicates the model’s probability (or ranking) of fraud.  
-- **Observation**: The new GBT model exhibits higher lift in the top deciles compared to the old model.  
-  - *For example, at the top 10% score cutoff, the new model may capture ~X% of total fraud while the old model captures only ~Y%. This improvement in top‐decile capture indicates stronger rank‐ordering ability.*  
-- Overall, the new model outperforms the old model in separating fraudulent from non‐fraudulent transactions.
+### 8.2.2. Data Sources for Model Implementation
 
-### 7.2.2. In‐Sample vs. Out‐of‐Sample Testing
+- **Inclearing Transaction Table** (`SB_FRAUD_NCA.incI_mth` or similar):  
+  - Primary source of deposit items for scoring.  
+  - Includes check amount, account details, transaction history, and other features.  
+- **Supporting Tables** (internal to Regions):  
+  - **SL1_DM, SL1_RF, SL1_DNCCR,** etc., used to enrich the transaction records with relationship, login, or case management attributes.  
+- **Vendor Data (if applicable)**:  
+  - As with the old model, no external vendor data is directly consumed at scoring time. All enhancements remain internal.
 
-- **In‐Sample** (Development): The model was first validated on the train/test split within the original development timeframe to confirm good performance and calibration.  
-- **Out‐of‐Time (OOT)**: The out‐of‐time evaluation ensures the model remains effective when scoring transactions from a **different period** not used during training.  
-  - The gains charts described above demonstrate that the model’s lift remains strong on OOT data, indicating **temporal stability**.  
+### 8.2.3. Weaknesses and Limitations in Source Data
 
-If you have results for other performance metrics (AUC‐ROC, KS statistic, confusion matrix) on OOT data, **include them here**.
+- **Missing Fields or Records**:  
+  - Rarely, certain checks may lack critical fields (e.g., no item serial number). As in the old model, these items receive partial scoring or default values.  
+- **Infrequent Data Delays**:  
+  - Overnight ingestion delays can occasionally cause a small subset of transactions to miss the day’s scoring window. They are captured and scored retroactively once the data is complete.
 
-### 7.2.3. Benchmarking
+### 8.2.4. Data Appropriateness and Accuracy
 
-To gauge whether the new model meets business expectations, we compared it to the **old model**.  
-- *If you have benchmarks from peer banks, industry standards, or subject‐matter expert opinions, describe them briefly.*  
-- State that the new GBT model “exhibits a [numeric range] improvement in fraud capture rate or AUC‐ROC” relative to the old approach, aligning with or surpassing internal benchmarks.
+The production data follows the same schema and cleaning rules as the development dataset, ensuring consistency. Periodic data audits confirm alignment between the development sample and live production feeds. If any outlier patterns emerge (e.g., new transaction codes), updates are made to the transformation logic to maintain model accuracy.
 
-### 7.2.4. Sensitivity and Stability Testing
+### 8.2.5. Handling Missing or Unknown Values
 
-Tree‐based methods like GBT can capture complex interactions, so it is often valuable to **stress‐test** the model on unusual input ranges or run partial dependence analyses:
+Any missing numeric fields continue to be imputed with **[–999 or 0, as appropriate]**, consistent with the approach taken during model training. Categoricals that are unrecognized or empty default to “unknown” categories. This approach has been retained from the old model to ensure consistent scoring behavior.
 
-- **Relationship of Input Values to Output**:  
-  - *If partial dependence or ceteris paribus curves exist, mention them here.*  
-  - *For example, “We vary [Feature A] from its 5th to 95th percentile while holding other features constant and observe the predicted fraud probability.”*
+## 8.3. Production Environment
 
-- **Extreme Values or Boundaries**:  
-  - *State if you tested the model’s predictions for extremely large amounts or highly unusual account activity. Did the model remain stable?*
+The production environment is hosted on **[CDSW / Hadoop Yarn / Spark cluster name]**, where the PySpark scoring pipeline executes on a daily schedule. The environment automatically pulls together the relevant data tables, runs feature transformations, and applies the GBT model. Key aspects:
 
-- **Parameter Stability Over Time**:  
-  - *If you repeated training on slightly different time windows and observed consistent performance, mention it.*  
+1. **Data Integration & Model Execution**  
+   - The daily job merges inclearing checks with relevant reference tables.  
+   - The GBT scoring step runs after successful data ingestion, generating a **fraud score** per item.
 
-If no formal sensitivity analyses were conducted, you can note it as future work or confirm that standard business checks suffice.
+2. **Rules and Overrides**  
+   - The final fraud detection process relies on a combination of model output plus any business rules. For instance, certain high‐risk item types might be flagged regardless of model score.  
+   - These overrides are the same ones used with the old model; they have been tested with the new GBT scores to confirm compatibility.
+
+3. **Control / Production Checks**  
+   - The pipeline logs each step’s status (extraction, transformation, scoring) to a monitoring dashboard.  
+   - Reconciliation checks ensure that the number of rows scored matches the expected count of daily transactions.  
+   - If errors occur, the pipeline triggers alerts to the Data & Analytics team to investigate and re‐run if necessary.
+
+## 8.4. Model Output and Reporting
+
+### 8.4.1. How Output Is Used and Weighed
+
+The model outputs a numeric probability (fraud likelihood) for every check. Fraud Operations uses these scores to prioritize which items undergo a deeper investigation:
+
+- **Score Thresholds**: If the predicted fraud likelihood exceeds certain cutoffs (e.g., top 5%), an alert is created in **Detica**.  
+- **Further Processing**: No additional models consume the GBT output. The risk score is integrated directly into the existing rule engine for advanced decision logic.
+
+### 8.4.2. Transmission and Automation Controls
+
+Once daily scoring is complete, the resulting dataset (with final scores) is written to **[HDFS / a production table / object storage]**. Fraud Operations systems fetch these scores in near‐real time, applying them to:
+
+- **Alerts**: An item with a high fraud score triggers an immediate alert for manual review.  
+- **Reporting**: Summaries of daily alerts and captured fraud amounts are compiled in standard management reports.
+
+### 8.4.3. Datasets Storing Model Results
+
+- **Production Scored Table**: **`dm_fraud_detection.inc_frd_scored_v3`** (example naming) stores each check’s final features, the GBT score, and relevant metadata (date/time of scoring, system run ID, etc.).  
+- **Historical Audit Dataset**: Archives older daily outputs, ensuring traceability for compliance and monitoring.
+
+### 8.4.4. Disclaimers, Information, and Assumptions
+
+- **Model Uncertainty**: The GBT score is a statistical estimate, not a definitive fraud/no‐fraud determination.  
+- **Use of Imputed Values**: Missing data is imputed following the same scheme as training. This is highlighted in the model documentation to warn users that extremely missing data could reduce confidence in the score.  
+- **Interpretation**: The final decision (to return or pay a check) remains the responsibility of Fraud Operations, guided by the model’s ranking but supplemented by domain expertise.
+
+### 8.4.5. Controls and Reviews
+
+- **Operational Reviews**: The business regularly reviews performance metrics (e.g., daily fraud capture, false positives) to ensure the model continues meeting goals.  
+- **Committee Acceptance**: Any major changes to thresholds or the scoring pipeline are presented to the Model Risk Management committee for approval, maintaining governance standards.
 
 ---
 
-### Conclusion of Outcomes Analysis
-
-Summarizing the results:
-
-- **Assumption Testing**: As a non‐parametric, tree‐based method, GBT does not require the classical linear assumptions. No violations or issues were identified.  
-- **Performance Testing**: The new model provides **improved rank ordering** and **higher lift** over the old model. Gains charts on out‐of‐time data confirm robust performance beyond the training window.  
-- **Recommended Next Steps**:  
-  - Continue monitoring model performance on recent production data for drift.  
-  - Potentially perform more detailed partial dependence or scenario testing to ensure stability under various operating conditions.
-
-With these analyses, the model meets its developmental objectives and appears ready for further validation or deployment, subject to additional business or regulatory reviews.
+**In summary**, the **Model Implementation** for Version 3 follows the same robust pipeline and operational framework as its predecessor. It leverages existing data sources, transformations, and rule sets—requiring only minimal adjustments to accommodate the newly trained GBT model. This consistent design ensures minimal disruption while introducing improved fraud detection capability.
