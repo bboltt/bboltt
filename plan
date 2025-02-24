@@ -8,20 +8,13 @@ In the development process, the model owner should ensure the model undergoes **
 
 ## 7.1. Assumption Testing
 
-Many traditional statistical methods (e.g., linear regression) require checks for **multicollinearity**, **autocorrelation**, and **stationarity**. Some examples include:
+Since this project’s core predictive model is a non‐parametric GBT classifier, it does not rely on classical linear assumptions (e.g., normal residuals or homoskedasticity). Tree‐based methods naturally handle a wide range of feature distributions and correlation structures, so formal tests for multicollinearity (e.g., Variance Inflation Factors), autocorrelation (Durbin‐Watson), and stationarity (cointegration) are **not** strictly required for model validity.
 
-- **Variance Inflation Factor (VIF) Test** for multicollinearity  
-- **Durbin‐Watson Test** for autocorrelation  
-- **Stationarity and Cointegration Testing** (often relevant in time‐series contexts)
+Nonetheless, the data was examined to confirm there were no evident structural anomalies:
+- **Feature Distributions** were checked for extreme skew. No transformations were deemed necessary.  
+- **Temporal Drift** was monitored by splitting the dataset into distinct in‐time and out‐of‐time segments. The model’s stable performance across these segments (detailed in Section 7.2) indicates no major temporal biases.  
 
-However, the core model in this project is a **Gradient Boosted Trees (GBT)** classifier, which is tree‐based and *non‐parametric*. By design, GBTs typically **do not require** the linear‐model assumptions of normality or no autocorrelation in residuals. Moreover, tree‐based methods handle correlated features more robustly than linear models, so extensive collinearity checks (VIF) may be less critical here.
-
-> **If you applied any assumption checks anyway**  
-> - *For example, if you calculated VIF on your numeric features or tested for concept drift in time, summarize it here.*  
-> - *If no major violations or data issues were found, you can state that.*  
-
-In this particular GBT approach, **no explicit parametric assumptions** (like linearity) are strictly required. Hence, these assumption tests can be marked as “N/A” unless you performed them for due diligence. If your team did not run formal tests (e.g., Durbin‐Watson) or found no issues, simply record that no model assumptions were violated.
-
+No additional parametric assumptions apply. Therefore, no assumption violations were observed, and no further tests were required.
 ## 7.2. Performance Testing
 
 Performance testing verifies that the model’s **predictions** align with the **actual outcomes** on both in‐time and out‐of‐time (OOT) data. In this project, we evaluated performance using:
