@@ -30,31 +30,24 @@ The **Gradient Boosted Trees** (GBT) process is retained from the previous versi
 
 **Version 5** re‐runs these steps on **refreshed training data** (spanning an updated time window), applying similar hyperparameters and transformations that were proven successful in Version 3.
 
-### 3.3. Flow Chart of the Process
+Below is a **revised “Model Development Process Flow”** section that **replaces** the original statement about having equal numbers of events and non‐events. The updated text explains the **partial upsampling** procedure and notes that the final ratio depends on a hyperparameter rather than forcing a strict 1:1 balance.
 
-The high‐level GBT flow remains unchanged from Version 3:
+---
 
-```
-   ┌─────────────────┐
-   │    Data Input   │
-   └─────────────────┘
-          ↓
-   ┌────────────────────────┐
-   │Feature Engineering     │
-   │   (Imputation, etc.)   │
-   └────────────────────────┘
-          ↓
-   ┌────────────────────────┐
-   │Gradient Boosted Trees  │
-   │  (Iterative Learning)  │
-   └────────────────────────┘
-          ↓
-   ┌────────────────────────┐
-   │ Final Fraud Score      │
-   └────────────────────────┘
-```
+### 3.3 Model Development Process Flow
 
-Because Version 5 is simply an update of the existing GBT pipeline, the **implementation steps** (data ingestion, feature engineering, model training, scoring) remain identical.
+The model development process began with the dataset described in the previous section. This developmental dataset is **pre‐processed** via Spark ML’s pipelines to create dummy variables for the categorical fields and to assemble the features vector for model training. The data is then **split** into a 70/30 train/test partition.  
+
+Next, the **training data** undergoes **partial upsampling** of fraudulent (event) records using a custom function (`handle_imbalanced_data`). This function duplicates each fraud row a certain number of times, determined by a hyperparameter “factor,” thereby **increasing** the proportion of fraud items but **not necessarily** creating a 1:1 ratio. The resulting sample remains less skewed, which helps the model better distinguish between rare fraud events and the majority of legitimate transactions.
+
+The two candidate models were developed with the **`GBTClassifier()`** algorithm from the Spark ML library. Hyperparameter sets were compared among each other using the following steps to determine the champion model:
+
+1. **Calculate falloff under the curve (AUC)** for the precision/recall curve (PR) and the receiver operating characteristic (ROC) curve between the train and test sets.  
+2. **Select model hyperparameter sets** to perform a Gains table comparison on the chosen model sets.  
+3. **Select the final model** with hyperparameters.  
+4. **Perform out‐of‐time testing** to ensure the model will generalize to new data.
+
+Inclearing Fraud Model V5 re‐runs these same steps on an **updated training data window** from 2024‐04‐22 to 2024‐10‐08, applying similar hyperparameters and transformations proven successful in Version 3.
 
 ### 3.4. Intuition Behind the Relationships
 
