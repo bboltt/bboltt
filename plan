@@ -131,6 +131,49 @@ Overall, while the Inclearing Fraud Model leverages a robust set of features and
 
 
 
+## 5.4. Model Specification, Segmentation, and Variable Selection
+
+### Rationale for Chosen Theory, Methodology, and Specification
+
+- **Coverage of Major Fraud Risk Factors**  
+  From the start, the model design prioritized capturing signals tied to suspicious check amounts, repeated deposits within short time frames, and Mitek’s suspect‐item scoring. These variables represent **key risk drivers** for inclearing items. The team concluded that a **gradient boosting** approach (GBT) would best integrate these varied features—both numeric (like `amount` or `daily_max`) and categorical (like `DSM_MTYPE`)—while inherently managing non‐linear interactions among them.
+
+- **Why Gradient Boosted Trees**  
+  The documentation indicates that earlier explorations included traditional logistic regression and a neural network concept. Ultimately, tree‐based methods showed stronger performance with minimal feature encoding overhead. GBT, in particular, provided more stable and **highly ranked** fraud detection across the training/testing splits, outperforming alternative algorithms in AUC and Gains metrics.
+
+- **No Separate Portfolio Segmentation**  
+  Rather than segment checks by product or region, the development data included **all** inclearing items meeting the established filters (Section 2.2.1). The project team determined that a single, unified model would better accommodate cross‐account patterns of fraud, ensuring comprehensive coverage of risk factors.
+
+### Alternative Methodologies
+While logistic regression and a neural approach were considered, the final selection was **GBTClassifier** from Spark ML. The documentation highlights GBT’s ensemble advantage and robust handling of unbalanced classes, as well as strong empirical results in pilot Gains and AUC tests.
+
+### Data Rebalancing
+Because fraudulent checks represented only a small portion of total deposits, the dataset was **upsampled** to give the model more event samples. This partial duplication of fraud cases enabled the GBT to learn distinguishing signals more effectively.
+
+### Segmentation
+No specialized segmentation (e.g., by account type) was performed. Instead, the entire population—excluding only certain out‐of‐scope items like commercial positive‐pay checks—was scored collectively.
+
+### Target Variable Experimentation
+The model’s **binary target** (fraud or not) was derived from the **alert** and **claim** data in the deposit platform and the Fraud .NET application. No alternative definitions for the fraud label were tested, as the existing approach aligned with the bank’s operational claims process.
+
+### Variable Selection
+1. **Initial Feature Pool**  
+   - The raw fields included numeric/categorical variables from multiple systems (SL1_DM, SL1_DNCCR, SL1_FDP_MTK).  
+   - Variables reflecting check amounts, account usage, or Mitek analysis were the main drivers.  
+2. **Feature Refinement**  
+   - Dummy encoding converted relevant categorical fields (e.g., `DSM_MTYPE`) into numeric indicators.  
+   - After exploratory analysis, the team retained only the fields most predictive of fraud (see Section 2.2.4).  
+
+### Hyperparameter Selection
+Key parameters—e.g., `maxDepth`, `maxBins`, `stepSize`, and `subsamplingRate`—were tuned via multiple runs on a 70/30 split. **AUC** and Gains chart performance guided the final choices, balancing detection gains and overfitting risks.
+
+### Model Thresholds
+The model outputs a **probability score** for each transaction. Downstream rules interpret these scores, setting thresholds that trigger specific alerts or actions. The documentation does not specify a single fixed cutoff inside the model itself.
+
+---
+
+**In summary**, the project team selected **GBTClassifier** for its strong empirical performance and ability to capture critical fraud‐risk factors from the inclearing dataset. Data rebalancing helped address low event frequency, and no distinct segmentation was applied. Feature selection and hyperparameter tuning were guided by Gains tables and AUC metrics, ensuring the final model offers robust detection power across a wide range of checks.
+
 ## 8.1. Summary of Model Implementation
 
 The Inclearing Fraud Model V3 is implemented as part of the **Financial Crimes Non‐Card Transaction** fraud detection pipeline. It uses **PySpark** on **[CDSW / Spark cluster / internal big data platform]** to generate daily fraud scores for each inclearing transaction. These scores feed into the **Fraud Operations** rules engine, enabling real‐time or near‐real‐time alerts for potential fraudulent checks.
