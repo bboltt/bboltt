@@ -79,6 +79,58 @@ As a **non‐parametric** model, GBT does not impose strict linear or distributi
 
 This chapter explains how the updated Inclearing Fraud Model (Version 3) is deployed and integrated within the organization’s production environment, including data sources, transformations, and the reporting mechanism for fraud risk scores.
 
+
+
+# 5. Model’s Conceptual Framework
+
+## 5.1. Definitions
+
+### Phenomena or Events Under Consideration
+The Inclearing Fraud Model focuses on **fraudulent check deposits** that pass through the inclearing process at Regions—specifically, checks drawn on Regions accounts and deposited at another institution, or vice versa, which may be **forged, altered, or otherwise unauthorized**. The overarching goal is to detect these items using historical account‐level and transaction‐level indicators.
+
+### Target Variable
+The model’s target variable is a binary **fraud indicator**:
+- **`1`** if the check was ultimately confirmed or highly suspected as fraudulent, often via the Fraud .NET system or assigned Tier 1 return codes.
+- **`0`** if the check was deemed legitimate and not returned for fraud reasons.
+
+This classification stems from deposit platform data, supplemented by claims information in the Fraud .NET application. By uniting these sources, the model identifies which checks truly represent fraud events versus normal transactions.
+
+---
+
+## 5.2. Assumptions
+
+1. **Fraud Label Accuracy**  
+   The model presumes that the official dispositions—i.e., which checks are flagged as fraud—are fundamentally correct. This underpins the training data’s label column.
+
+2. **Availability of Mitek Scores**  
+   Some checks include a Mitek “suspect item” score. The assumption is that this score is reliably captured for most inclearing items. Where it’s missing, the model either imputes or omits that feature.
+
+3. **Data Consistency Across Sources**  
+   Multiple tables (e.g., SL1_DM, SL1_DNCCR, SL1_FDP_MTK, etc.) feed into the final training dataset. The process assumes that the merges and transformations among these data sources do not introduce major discrepancies or timing misalignments.
+
+4. **Stable Patterns**  
+   Although fraud tactics can evolve, the model implicitly assumes that key risk signals (e.g., large deposit amounts, repeated suspicious checks) remain relevant during the timeframe from development to production usage.
+
+---
+
+## 5.3. Limitations
+
+1. **Exclusion of Commercial Accounts with Positive Pay**  
+   The Inclearing Fraud Model does not process checks from commercial accounts under positive pay arrangements. Those items are handled by a separate system, so any fraud in that segment is out of scope.
+
+2. **Occasional Missing Mitek Score**  
+   If a check’s image is not processed or lacks sufficient quality, Mitek’s suspect‐item analysis may be unavailable. This can diminish the model’s effectiveness for those transactions.
+
+3. **Potential Data Lags**  
+   Because a returned check can be confirmed as fraud days or weeks after deposit, the most recent incidents may not be labeled in time for the training window. Some near‐term fraud items might therefore remain undetected in historical data used for model building.
+
+4. **Rare Negative Amounts**  
+   The dataset includes some unusual transactions (e.g., negative deposit amounts), which are not commonly encountered. The model does score these items, but performance on such edge cases may be less predictable.
+
+Overall, while the Inclearing Fraud Model leverages a robust set of features and reliable labeling, these assumptions and limitations underscore the model’s dependence on timely data, consistent Mitek scores, and stable fraud definitions.
+
+
+
 ## 8.1. Summary of Model Implementation
 
 The Inclearing Fraud Model V3 is implemented as part of the **Financial Crimes Non‐Card Transaction** fraud detection pipeline. It uses **PySpark** on **[CDSW / Spark cluster / internal big data platform]** to generate daily fraud scores for each inclearing transaction. These scores feed into the **Fraud Operations** rules engine, enabling real‐time or near‐real‐time alerts for potential fraudulent checks.
