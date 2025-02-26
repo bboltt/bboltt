@@ -1,10 +1,10 @@
 import pandas as pd
-from pyspark.sql.functions import col, min, max, avg, stddev, count, when, expr, percentile_approx
+from pyspark.sql.functions import col, min, max, avg, stddev, count, when, expr
 
 # List of feature columns
 feature_columns = ["feature1", "feature2", "feature3"]  # Replace with actual feature names
 
-# Compute statistics for each column
+# Compute basic statistics
 stats_list = []
 for feature in feature_columns:
     stats = df.agg(
@@ -12,7 +12,6 @@ for feature in feature_columns:
         max(col(feature)).alias("max"),
         avg(col(feature)).alias("avg"),
         stddev(col(feature)).alias("stddev"),
-        percentile_approx(col(feature), 0.5).alias("median"),  # Approximate median
         (100 * (count(when(col(feature) == 0, 1)) / count(col(feature)))).alias("percent_zeros")
     ).withColumn("feature", expr(f"'{feature}'"))  # Add feature name as a column
 
@@ -23,11 +22,15 @@ final_stats_df = stats_list[0]
 for stats in stats_list[1:]:
     final_stats_df = final_stats_df.union(stats)
 
-# Reorder columns
-final_stats_df = final_stats_df.select("feature", "min", "max", "median", "avg", "stddev", "percent_zeros")
-
 # Convert to pandas DataFrame
 pandas_df = final_stats_df.toPandas()
+
+# Compute the median separately using `approxQuantile()`
+median_values = {feature: df.approxQuantile(feature, [0.5], 0.01)[0] for feature in feature_columns}
+pandas_df["median"] = pandas_df["feature"].map(median_values)
+
+# Reorder columns
+pandas_df = pandas_df[["feature", "min", "max", "median", "avg", "stddev", "percent_zeros"]]
 
 # Display in Jupyter Notebook
 import ace_tools as tools
@@ -35,6 +38,7 @@ tools.display_dataframe_to_user(name="Feature Statistics", dataframe=pandas_df)
 
 # Save to CSV if needed
 pandas_df.to_csv("feature_statistics.csv", index=False)
+
 
 
 
