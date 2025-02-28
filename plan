@@ -1,5 +1,25 @@
-Below is a **Data Preparation and Transformation** chapter that **focuses strictly** on the **data sources**, **fields**, and **transformations** used to build the **final dataset** for the Inclearing Fraud Model. It does **not** cover technical details of how PySpark or configuration utilities work, but rather **what** data is pulled and **how** it is enriched.
+8.2. Production Data Sources, Preparation, and Transformations
+Implementation / Prediction Data Pipeline
 
+In production, the same Spark pipeline used for development runs daily within the CDSW environment. It pulls inclearing transactions from the Data Lake, applies the identical feature‐engineering steps (Mitek image analysis, device/log data, account balances, etc.), and then generates a fraud score with the GBT model.
+Data Sources
+
+The model references the same internal Regions systems as in development:
+dm_fraud_detection.incI_mtk_h for the base inclearing transactions
+SL1_DM, SL1_FDP_MTK, SL1_DNCCW, SL1_MBANK for account, Mitek, call center, and mobile banking data
+No external vendor data is introduced at this stage; these sources remain fully internal to Regions.
+Weaknesses and Limitations
+
+Because the production data pipeline is identical to the developmental one, any potential issues (e.g., missing Mitek scores for certain checks, incomplete device logs) remain possible.
+If upstream tables are not updated or contain null fields, the pipeline uses fill values or leaves some features at defaults (e.g., zero).
+Data Appropriateness and Accuracy
+
+As with development data, the final production dataset undergoes the same joins and aggregations. The result is consistent with the training structure.
+There is no difference in the data logic or feature transformations; the only change is that transactions now reflect each day’s real‐time inclearing items rather than a historical sample.
+Assumed Values for Missing Data
+
+Just as in development, missing numeric fields (e.g., account balances, checkscore) default to zero, or a placeholder flag indicates incomplete records. This approach ensures that no rows are dropped due to nulls.
+Overall, the production pipeline replicates the developmental data sources and transformations, ensuring the daily inclearing items receive the same feature engineering and labeling logic that was validated during model development.
 ---
 
 # Data Preparation and Transformation
