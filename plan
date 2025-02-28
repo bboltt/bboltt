@@ -1,123 +1,120 @@
+Below is a **Data Preparation and Transformation** chapter that **focuses strictly** on the **data sources**, **fields**, and **transformations** used to build the **final dataset** for the Inclearing Fraud Model. It does **not** cover technical details of how PySpark or configuration utilities work, but rather **what** data is pulled and **how** it is enriched.
 
+---
 
 # Data Preparation and Transformation
 
-## 1. Overview of `WRITE_DEV.py`
+## 1. Base Transaction Data
 
-### 1.1. Script Structure and Workflow
+The main dataset originates from a table named **`dm_fraud_detection.incI_mtk_h`**, which contains individual inclearing deposit transactions. For each transaction, the script selects columns such as:
 
-1. **Spark Initialization**  
-   The script calls **`generate_spark_instance()`** to create a Spark session configured for reading and writing large datasets. It also retrieves configuration details (such as start/end dates) from **`get_config(...)`**.  
+- **`account_num`**: Unique identifier for the checking or savings account  
+- **`amount`**: Dollar value of the check deposit  
+- **`trans_date`** and **`trans_time`**: Date and time of deposit  
+- **`serial`**: Check serial number  
+- **Daily columns** (e.g., `daily_max`, `day_amount`, `day_balance`) that track per‐day deposit usage
 
-2. **Base Population Extraction**  
-   - A query against **`dm_fraud_detection.incI_mtk_h`** produces a DataFrame of inclearing transactions.  
-   - The DataFrame selects columns:  
-     - `account_num` (cast as bigint)  
-     - `amount` (cast as decimal)  
-     - `trans_time` and `trans_date`  
-     - `serial`  
-     - `day_amount`, `daily_max`, `day_avg_amount`, `day_balance`, `dep_account`, `dep_sav`, `dep_chk`, `rtn_acct`  
-     - Additional numeric or categorical fields spelled out in the code.  
-   - A derived column **`trans_hr`** is constructed from `trans_time` by taking the substring of the first two characters.
-
-3. **Feature Joins**  
-   The script invokes multiple helper functions (e.g., `mitek_feat(...)`, `veloDepst(...)`, `pullAccts(...)`) and merges them with the base DataFrame using Spark joins. Each function returns a DataFrame with specific columns described below. The code ensures type casting (e.g., decimal), filling nulls, and preserving distinct rows.
-
-4. **Label Construction**  
-   - **`Label_alert`** and **`Label_claim`** produce columns indicating whether a deposit is flagged as fraud in the deposit platform or Fraud .NET.  
-   - These columns are joined onto the main DataFrame, forming a final binary target (0 or 1).
-
-5. **Split into Train/Test**  
-   - The script applies **`randomSplit([0.7, 0.3], seed=1234)`** to create separate training (70%) and testing (30%) DataFrames.  
-   - A column named **`train_set`** is appended (1 for training rows, 0 for test rows).
-
-6. **Final Output**  
-   - The pipeline writes the curated data to Hive or Parquet (via `quick_write_hive(...)` or `.save()`).  
-   - This final DataFrame contains transaction‐level features and labels, ready for modeling.
+This base table underpins the modeling dataset, with one row per deposit transaction.
 
 ---
 
-## 2. Feature Engineering Modules
+## 2. Feature Enrichment
 
-`WRITE_DEV.py` imports from several Python files under **`src/inclearing/data_preprocess/`**. Each file provides specialized features or transformations:
+Once the base transactions are loaded, the pipeline joins multiple **feature modules** to generate additional fields that describe each deposit’s context.
 
-### 2.1. `feat_eng_mitek.py`
+### 2.1. Mitek Check Analysis
 
-- **Function**: `mitek_feat(spark, date)`  
-- **Purpose**: Gathers Mitek check‐image analysis data from tables such as **`fdp_mitek_request`**, **`fdp_mitek_response_analysis_detail`**, and **`fdp_mitek_response_account_detail`**.  
-- **Columns**:  
-  - `account_num`  
-  - `amount`  
-  - `trans_date`  
-  - `serial`  
-  - Summaries of Mitek responses (e.g., `checkscore`, `addressscore`, `miscscore`, `suspectendorsement`) aggregated by account.  
-- **Join Logic**: Aggregates columns by `(account_num, amount, trans_date, serial)` using `max()`, `min()` or other groupBy operations. Returns a single row per deposit for easy merging onto the main dataset.
+A Mitek module gathers check‐image features from tables like `fdp_mitek_request` or `fdp_mitek_response_analysis_detail`. Common outputs include:
 
-### 2.2. `feat_eng_mast.py`
+- **Checkscore** or **Addressscore** – Numeric ratings that reflect the likelihood of an altered or suspicious check image  
+- **Suspectendorsement** – A flag indicating whether the endorsement region appears mismatched  
+- **Miscscore** – Additional Mitek signals aggregated for the deposit
 
-- **Functions**: `Balances(...)`, `pullAccts(...)`, `ReturnBal(...)`  
-- **Purpose**: Retrieves deposit/savings account balances from tables like **`SL1_DM.ds002.dm14d_dmsave_h`** or **`SL1_DM.ds002.dm14d_dmasset_h`**.  
-- **Columns**:  
-  - Interval‐based aggregates: `avg_bal_30`, `std_bal_30`, `avg_bal_60`, and other numeric fields.  
-  - Merged on `account_num` to incorporate longer historical look‐backs of balances.  
-- **Join Logic**: The code filters each table by date range (`between(start, end)`), then aggregates over intervals (e.g., 30 days), and returns a DataFrame keyed by `account_num` for joining.
+These fields are aggregated by `(account_num, trans_date, serial)` so that each deposit row gains Mitek’s maximum or minimum rating over the check’s entire analysis record.
 
-### 2.3. `feat_eng_device.py`
+### 2.2. Account Balance and Savings Data
 
-- **Function**: `device_feats = device_chg_bi(...)`  
-- **Purpose**: Examines login or device usage logs from tables like **`sl1_mbank.eventreporting_h`**. Identifies changes in device or login patterns over the last 90 days.  
-- **Columns**:  
-  - `device_chg` indicates whether the user switched devices recently.  
-  - `odd_hour` indicates a sign‐on hour outside typical patterns.  
-  - `account_num` for joining.  
-- **Join Logic**: Aggregates usage data by `(account_num, date)`, merges with the main set on `account_num` and approximate date intervals.
+Another module queries deposit and savings account tables (e.g., `SL1_DM.ds002.dm14d_dmsave_h`) to retrieve:
 
-### 2.4. `feat_eng_call.py`
+- **Average / standard deviation** of the account balance over a specified window (e.g., 30, 60 days)  
+- **Recent deposit velocity** – how frequently funds are coming in  
+- **Return records** – whether the account had a prior returned item
 
-- **Function**: `call_feat = call_feat_pre(...)`  
-- **Purpose**: Captures call center interactions from data (e.g., **`SL1_dnccw`**), including call reasons, authentication scores, and voice scores.  
-- **Columns**:  
-  - `call_flag`, `authenticationscore`, `devicescore`, `risk_color`  
-  - `account_num` for the relationship to inclearing deposits.  
-- **Join Logic**: Joins on `account_num` and a date window, typically 14 days around the deposit date, to see if the user made a suspicious or escalated call.
+These balance and return statistics are grouped by `account_num` and then merged with each deposit. Columns might appear as `avg_bal_30`, `std_bal_30`, or `rtn_acct_flag` to flag historically returned accounts.
 
-### 2.5. `feat_eng_trans.py`
+### 2.3. Device Usage and Login Patterns
 
-- **Functions**: `GetTrans(...)`, `DepositTransGrouped(...)`, `SaveTransGrouped(...)`  
-- **Purpose**: Summarizes transaction types across credit or debit codes in **`SL1_DM.ds002.dm14d_odstran_h`**, grouping them by intervals (e.g., 30 days).  
-- **Columns**:  
-  - Aggregates like `TX_GRP1_CR_AMT`, `TX_GRP1_DB_AMT` for sub‐ranges of codes (e.g., 12, 13, 15).  
-  - `cc_debit_cnt`, `cc_credit_cnt` for card usage.  
-- **Join Logic**: Data is grouped by `(account_num, trans_date)` with date filters `between(start, end)`. The resulting numeric columns are joined to the main DataFrame for each deposit.
+A device module merges user sign‐on data from a mobile or internet banking table (e.g., `sl1_mbank.eventreporting_h`). For each account:
 
----
+- **Device changes** – Checking if the user recently switched to a new device  
+- **Odd hour** – Identifying logins at unusual times (e.g., after midnight)  
+- **Geo or IP mismatch** – If the user’s location unexpectedly changed
 
-## 3. Data Quality and Controls
+These fields are keyed by `account_num` and a date window, so each deposit row can include relevant device usage signals.
 
-### 3.1. Explicit Casting and Null Handling
-The code explicitly casts columns to Decimal or BigInt, preventing schema mismatches. Missing numeric fields are replaced with zero or a default value by statements like `.fillna(0, ...)`. This approach avoids Spark dropping rows and ensures consistent feature types.
+### 2.4. Call Center Interactions
 
-### 3.2. Distinct Keys and Left Joins
-Many DataFrames apply `.distinct()` to remove duplicated records. Left joins preserve the primary dataset of deposits, ensuring no transactions are lost if certain secondary data (e.g., device logs) is unavailable.
+A call module looks at records from contact‐center platforms (e.g., `SL1_dnccw`) to assess:
 
-### 3.3. Date Range Filters
-Functions accept arguments such as `(spark, start, end)` and filter input tables to the relevant timeframe. For example, `where col('ods_business_dt').between(date, date90)`. This ensures each feature accurately reflects the transaction’s historical context rather than including future or irrelevant data.
+- **Call reasons** or **wrap codes** – Documenting any unusual or high‐risk reason for contacting support  
+- **Voice authentication** or **risk_color** – Indications from phone channel about potential fraud  
+- **Escalation or verification** outcomes – Whether the call ended in additional screening
 
-### 3.4. Feature Labeling
-Fraud labels are determined by reading claim or alert details from **Fraud .NET** or deposit platform tables. The final label column is appended, ensuring each transaction is classified as `fraud=1` or `fraud=0` in a consistent manner.
+These metrics are typically aggregated at the account level over a short time horizon (such as 14 days around the deposit date) and joined to each deposit transaction.
+
+### 2.5. Transaction Code Summaries
+
+A transaction module classifies deposit or withdrawal codes (for instance, credit vs. debit) over different intervals (e.g., 30 days). It sums or counts them under columns like:
+
+- **TX_GRP1_CR_AMT** or **TX_GRP1_DB_AMT** – Cumulative credit/debit amounts in certain code families  
+- **CC_debit_cnt** – Number of card‐based withdrawals over that window  
+
+These aggregates help flag anomalies, like unusually large or frequent deposits.
 
 ---
 
-## 4. Summary of the Pipeline
+## 3. Fraud Label Assignment
 
-1. **Extract** inclearing deposits from **`dm_fraud_detection.incI_mtk_h`** based on a chosen date or date range.  
-2. **Load** auxiliary features by calling specialized modules: `feat_eng_mitek`, `feat_eng_mast`, `feat_eng_device`, `feat_eng_call`, and `feat_eng_trans`.  
-3. **Join** these features onto the main dataset through Spark merges keyed on columns like `account_num`, `trans_date`, `serial`, and time intervals.  
-4. **Assign** fraud labels by combining deposit platform alerts and Fraud .NET claim data.  
-5. **Split** the final DataFrame into training and testing sets using `randomSplit([0.7, 0.3], seed=1234)`.  
-6. **Write** the curated dataset to Hive or Parquet for subsequent modeling steps.  
+After combining all feature sets, the pipeline appends a **fraud label**. This label is based on:
 
-Through this process, `WRITE_DEV.py` ensures each inclearing transaction is enriched with device usage data, Mitek check analysis, call center interactions, and account balances. The data pipeline’s controls (explicit casting, date filtering, left joins) help maintain accuracy and consistency, culminating in a comprehensive table for Gradient Boosted Trees training.
+- **Fraud .NET** signals – If an item was confirmed fraudulent in the internal case‐management system  
+- **Alerts** from the deposit platform – Marking a transaction as “check fraud” if it triggered a specialized alert code
+
+If the deposit was ultimately deemed fraudulent, the label is set to `1`; otherwise `0`. This binary indicator is critical for model training and evaluation.
+
+---
+
+## 4. Data Quality Measures
+
+To ensure consistency across the final dataset:
+
+1. **Column Casting and Fill Values**  
+   Numeric fields, such as amounts or Mitek scores, are cast to appropriate decimal or integer types. Missing values are replaced with 0 (or another default) to prevent dropping rows.
+
+2. **Distinct and Filtered Joins**  
+   When multiple feature sources return data for the same account or deposit date, the pipeline employs distinct row checks or carefully merges using left joins. This preserves the base deposit population while limiting duplication.
+
+3. **Time‐Window Restriction**  
+   Each feature module (call center, device logs, Mitek) retrieves only records that match the deposit’s timeframe (e.g., no future data). This keeps historical context aligned with deposit dates.
+
+4. **Matching Keys**  
+   Shared fields like `account_num`, `trans_date`, and `serial` enable consistent merging. The pipeline verifies these are present in both the base deposit DataFrame and each feature set.
+
+---
+
+## 5. Final Output
+
+Once all features and the fraud label are joined, the pipeline **writes** the resulting dataset to a dedicated Hive or Parquet location. The final DataFrame thus represents a comprehensive view of each deposit’s:
+
+- **Transaction details**  
+- **Check image analysis**  
+- **Account balances and returns**  
+- **Device/login behavior**  
+- **Call center interactions**  
+- **Transaction code summaries**  
+- **Binary fraud label**  
+
+This integrated dataset serves as the foundation for further model development, training, and evaluation, ensuring that each deposit record contains the full suite of relevant signals to help identify potential fraud.
 ---
 
 ## 3. Model Description
