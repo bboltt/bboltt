@@ -1,3 +1,30 @@
+Below is an example **“Portfolios”** chapter that mirrors your provided format but reflects the reality that you have **only one model** (i.e., no separate sub‐models by segment or channel). The text references a single consolidated table that tracks total transaction counts, amounts, and fraud metrics over time.
+
+---
+
+## 2. Portfolios
+
+In this project, the inclearing fraud model covers all consumer deposit checks in a unified manner rather than splitting them by segment or channel. Consequently, we do not maintain sub‐models (like ATM or branch sub‐models). Instead, a single portfolio captures every in‐scope deposit transaction for the relevant timeframe.
+
+To monitor activity within this single portfolio, the team compiles a table summarizing each week’s or month’s transactions. This table may include:
+
+week_start (or month_start): The date marking the beginning of the reporting interval
+total_count: Number of inclearing deposit transactions during that interval
+total_amount: Sum of dollar amounts for those deposits
+Tier 1 count and Tier 1 amount (if applicable): Number and total value of deposits returned for Tier 1 fraud reasons (e.g., forgery, altered item)
+total_fraud count and total_fraud_amount: Overall confirmed fraud cases identified in that period
+Other columns capturing additional data or derived metrics, such as the percentage of items flagged, alt text usage, or “unt_percentage” if relevant
+In this hypothetical layout, **every** deposit transaction is part of one combined set—no separate ATM, branch, or mobile sub‐model. By reviewing columns such as **`total_count`**, **`total_amount`**, and **`total_fraud_amount`**, stakeholders can evaluate the model’s performance and identify any spikes in fraudulent activity over time.
+
+In this hypothetical layout, every deposit transaction is part of one combined set—no separate ATM, branch, or mobile sub‐model. By reviewing columns such as total_count, total_amount, and total_fraud_amount, stakeholders can evaluate the model’s performance and identify any spikes in fraudulent activity over time.
+
+Because the deposit checks are not segmented by channel, the table provides a straightforward, all‐encompassing view of the deposit portfolio’s transaction volume, associated fraud returns, and key metrics to monitor trends week to week or month to month.
+
+
+
+
+
+
 8.2. Production Data Sources, Preparation, and Transformations
 Implementation / Prediction Data Pipeline
 
