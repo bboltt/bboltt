@@ -1,3 +1,99 @@
+# CODE SNIPPET (MODIFIED)
+
+# 1) Compute each PWM's similarity_to_center rather than distance
+#    We'll define a helper function to do cos similarity,
+#    or reuse your existing cos_sim(...) function if you have it.
+
+def cosine_similarity(v1, v2):
+    # same approach as in your code
+    return float(np.dot(v1, v2) / (np.linalg.norm(v1)*np.linalg.norm(v2)))
+
+distances = []
+similarities = []
+for i, c_id in enumerate(cluster_ids):
+    center_vec = kmeans.cluster_centers_[c_id]  # scikit center
+    row_vec = scaled[i]
+    # distance = np.linalg.norm(row_vec - center_vec)
+    sim = cosine_similarity(row_vec, center_vec)
+    similarities.append(sim)
+
+pdf["similarity_to_center"] = similarities
+
+# 2) Create a Spark DF with cluster assignments
+df_with_clusters = spark.createDataFrame(pdf)
+
+# 3) Group by cluster_id => the "worst" PWM is the one with the LOWEST similarity
+gpdf = pdf.groupby("cluster_id")["similarity_to_center"].min().reset_index()
+
+min_sim_rows = []
+for row in gpdf.itertuples(index=False):
+    min_sim_rows.append(
+        Row(cluster_id=int(row.cluster_id), min_similarity=float(row.similarity_to_center))
+    )
+min_sim_df = spark.createDataFrame(min_sim_rows)
+
+return df_with_clusters, centers_df, scaler, features, min_sim_df
+
+
+
+
+
+# CODE SNIPPET (ORIGINAL EXCERPT)
+
+# Cross join each consumer row with each cluster center => cos_similarity, distance_to_center
+# ...
+df_best = df_join \
+    .withColumn("rn", F.row_number().over(w)) \
+    .filter(F.col("rn") == 1) \
+    .drop("rn") \
+    .withColumnRenamed("cos_similarity", "max_similarity")
+
+# Then you join on max_dist_df
+df_filtered = df_best.join(max_dist_df, on="cluster_id", how="left") \
+    .filter(F.col("distance_to_center") <= F.col("max_distance"))
+
+
+
+
+# CODE SNIPPET (MODIFIED)
+
+# After picking best cluster for each consumer (df_best),
+# rename "cos_similarity" => "max_similarity" as before
+df_best = df_join \
+    .withColumn("rn", F.row_number().over(w)) \
+    .filter(F.col("rn") == 1) \
+    .drop("rn") \
+    .withColumnRenamed("cos_similarity", "max_similarity")
+
+# 2) Now join with your min_sim_df
+df_filtered = df_best.join(min_sim_df, on="cluster_id", how="left") \
+    .filter(F.col("max_similarity") >= F.col("min_similarity"))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
