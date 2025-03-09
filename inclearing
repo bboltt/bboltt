@@ -1,43 +1,46 @@
 from pyspark.sql import functions as F
 
-# Check min and max amount
-amount_stats = train.select(
-    F.min("amount").alias("min_amount"),
-    F.max("amount").alias("max_amount")
-).collect()
+# Define your bucket splits and labels
+bucket_splits = [0, 100, 1000, 10000, 100000, 1000000, float('inf')]
+bucket_labels = ["0-100", "100-1000", "1000-10000", "10000-100000", "100000-1000000", "1000000+"]
 
-min_amount = amount_stats[0]["min_amount"]
-max_amount = amount_stats[0]["max_amount"]
-
-print(f"Minimum amount: {amount_stats[0]['min_amount']}")
-print(f"Maximum amount: {amount_stats[0]['max_amount']}")
-
-# Example Aggregation: calculate fraud counts per business date
-fraud_summary = train.groupBy("ods_business_dt").agg(
-    F.sum(F.col("label")).alias("fraud_count"),
-    F.count("*").alias("total_count"),
-    (F.sum(F.col("label")) / F.count("*")).alias("fraud_rate")
-).orderBy("ods_business_dt")
-
-fraud_summary.show()
-
-
-# Define bins based on the amount distribution you found
-bins = [0, 50, 100, 500, 1000, 5000, 10000, float('inf')]
-labels = ['0-50', '51-100', '101-500', '501-1000', '1000+']
-
-# Use PySpark Bucketizer for binning amounts
+# Bucketizer from PySpark ML to create buckets
 from pyspark.ml.feature import Bucketizer
 
-bucketizer = F.udf(lambda amt: next((f"{bins[i]}-{bins[i+1]}" for i in range(len(bins)-1) if bins[i] <= amt < bins[i+1]), f">{bins[-1]}"))
+bucketizer = Bucketizer(
+    splits=bucket_splits,
+    inputCol="amount",
+    outputCol="amount_bucket_idx"
+)
 
-train_binned = train.withColumn("amount_bin", bucketizer("amount"))
+# Apply bucketizer
+train_bucketed = bucketizer.setHandleInvalid("keep").transform(train)
 
-# Fraud summary by bin
-fraud_bin_summary = train_binned.groupBy("amount_bin").agg(
-    F.sum("label").alias("fraud_count"),
-    F.count("*").alias("total_count"),
-    (F.sum(F.col("label")) / F.count("*")).alias("fraud_rate")
-).orderBy("amount_bin")
+# Map bucket indices to labels
+bucket_label_expr = F.create_map([F.lit(i) for pair in enumerate(bucket_labels) for i in pair])
 
-fraud_summary.show()
+train_bucketed = train_bucketed.withColumn(
+    "amount_bucket",
+    bucket_label_expr[F.col("amount_bucket_idx").cast("integer")]
+)
+
+# Extract month from ods_business_dt
+train_bucketed = train_bucketed.withColumn(
+    "month",
+    F.date_format("ods_business_dt", "yyyy-MM")
+)
+
+# Aggregate to calculate fraud rate
+fraud_rate_df = train_bucketed.groupBy("month", "amount_bucket").agg(
+    (F.sum("label") / F.count("*")).alias("fraud_rate")
+)
+
+# Pivot the table to get desired format
+final_df = fraud_rate_df.groupBy("month").pivot("amount_bucket", bucket_labels).agg(F.first("fraud_rate"))
+
+# Sort by month
+final_df = final_df.orderBy("month")
+
+# Display final result
+final_df.show(truncate=False)
+
