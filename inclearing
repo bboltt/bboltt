@@ -1,0 +1,43 @@
+from pyspark.sql import functions as F
+
+# Check min and max amount
+amount_stats = train.select(
+    F.min("amount").alias("min_amount"),
+    F.max("amount").alias("max_amount")
+).collect()
+
+min_amount = amount_stats[0]["min_amount"]
+max_amount = amount_stats[0]["max_amount"]
+
+print(f"Minimum amount: {amount_stats[0]['min_amount']}")
+print(f"Maximum amount: {amount_stats[0]['max_amount']}")
+
+# Example Aggregation: calculate fraud counts per business date
+fraud_summary = train.groupBy("ods_business_dt").agg(
+    F.sum(F.col("label")).alias("fraud_count"),
+    F.count("*").alias("total_count"),
+    (F.sum(F.col("label")) / F.count("*")).alias("fraud_rate")
+).orderBy("ods_business_dt")
+
+fraud_summary.show()
+
+
+# Define bins based on the amount distribution you found
+bins = [0, 50, 100, 500, 1000, 5000, 10000, float('inf')]
+labels = ['0-50', '51-100', '101-500', '501-1000', '1000+']
+
+# Use PySpark Bucketizer for binning amounts
+from pyspark.ml.feature import Bucketizer
+
+bucketizer = F.udf(lambda amt: next((f"{bins[i]}-{bins[i+1]}" for i in range(len(bins)-1) if bins[i] <= amt < bins[i+1]), f">{bins[-1]}"))
+
+train_binned = train.withColumn("amount_bin", bucketizer("amount"))
+
+# Fraud summary by bin
+fraud_bin_summary = train_binned.groupBy("amount_bin").agg(
+    F.sum("label").alias("fraud_count"),
+    F.count("*").alias("total_count"),
+    (F.sum(F.col("label")) / F.count("*")).alias("fraud_rate")
+).orderBy("amount_bin")
+
+fraud_summary.show()
