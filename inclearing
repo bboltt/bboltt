@@ -1,27 +1,26 @@
 from pyspark.sql import functions as F
+from pyspark.ml.feature import Bucketizer
 
-# Define your bucket splits and labels
+# Define your buckets and labels
 bucket_splits = [0, 100, 1000, 10000, 100000, 1000000, float('inf')]
 bucket_labels = ["0-100", "100-1000", "1000-10000", "10000-100000", "100000-1000000", "1000000+"]
 
-# Bucketizer from PySpark ML to create buckets
-from pyspark.ml.feature import Bucketizer
-
+# Bucketize the amount column
 bucketizer = Bucketizer(
     splits=bucket_splits,
     inputCol="amount",
-    outputCol="amount_bucket_idx"
+    outputCol="amount_bucket_idx",
+    handleInvalid='keep'
 )
 
 # Apply bucketizer
-train_bucketed = bucketizer.setHandleInvalid("keep").transform(train)
+train_bucketed = bucketizer.transform(train)
 
-# Map bucket indices to labels
-bucket_label_expr = F.create_map([F.lit(i) for pair in enumerate(bucket_labels) for i in pair])
-
+# Map bucket indices to readable labels
+mapping_expr = F.create_map([F.lit(i) for pair in enumerate(bucket_labels) for i in pair])
 train_bucketed = train_bucketed.withColumn(
     "amount_bucket",
-    bucket_label_expr[F.col("amount_bucket_idx").cast("integer")]
+    mapping_expr[F.col("amount_bucket_idx").cast("integer")]
 )
 
 # Extract month from ods_business_dt
@@ -30,17 +29,18 @@ train_bucketed = train_bucketed.withColumn(
     F.date_format("ods_business_dt", "yyyy-MM")
 )
 
-# Aggregate to calculate fraud rate
+# Compute fraud rate by month and bucket
 fraud_rate_df = train_bucketed.groupBy("month", "amount_bucket").agg(
     (F.sum("label") / F.count("*")).alias("fraud_rate")
 )
 
-# Pivot the table to get desired format
+# Pivot to get the final table format you want
 final_df = fraud_rate_df.groupBy("month").pivot("amount_bucket", bucket_labels).agg(F.first("fraud_rate"))
 
 # Sort by month
 final_df = final_df.orderBy("month")
 
-# Display final result
+# Show final dataframe
 final_df.show(truncate=False)
+
 
