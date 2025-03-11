@@ -76,13 +76,12 @@ feature_categories:
 
 
 # insight_pipeline.py
-# Place this in: private_wealth_retention/consumer_prospecting/model/
+# Place in: private_wealth_retention/consumer_prospecting/model/
 
 import pyspark.sql.functions as F
 from pyspark.ml.feature import VectorAssembler
 from pyspark.ml.classification import RandomForestClassifier
 from pyspark.ml import Pipeline
-from pyspark.sql.types import Row
 
 
 def train_cluster_insight_model(
@@ -96,25 +95,20 @@ def train_cluster_insight_model(
     max_depth=5
 ):
     """
-    For the given cluster_col == cluster_id, label that cluster's prospects as 1, others as 0,
-    then train a "cluster vs rest" RandomForest to see which features matter most.
-
-    Returns a list of (feature, importance) sorted descending.
+    For cluster_col == cluster_id, label those rows as 1, others as 0,
+    then train a 'cluster vs rest' RandomForest.
+    Returns a sorted list of (feature, importance).
     """
-    # 1) Build the label: 1 if cluster_col == cluster_id, else 0
     df_labeled = df.withColumn(
         label_col,
         F.when(F.col(cluster_col) == cluster_id, 1.0).otherwise(0.0)
     )
 
-    # 2) VectorAssembler
     assembler = VectorAssembler(
         inputCols=feature_cols,
         outputCol="features",
         handleInvalid="skip"
     )
-
-    # 3) RandomForest
     rf = RandomForestClassifier(
         labelCol=label_col,
         featuresCol="features",
@@ -126,24 +120,28 @@ def train_cluster_insight_model(
     pipeline = Pipeline(stages=[assembler, rf])
     model = pipeline.fit(df_labeled)
 
-    # 4) Extract feature importances
-    rf_model = model.stages[-1]  # The fitted RandomForestClassificationModel
-    importances_array = rf_model.featureImportances.toArray()
-    feature_importance_pairs = list(zip(feature_cols, importances_array))
+    rf_model = model.stages[-1]  # RandomForestClassificationModel
+    importances = rf_model.featureImportances.toArray()
+    feature_importance_pairs = list(zip(feature_cols, importances))
     feature_importance_pairs.sort(key=lambda x: x[1], reverse=True)
 
     return feature_importance_pairs
 
 
-def compute_cluster_percentiles(df, cluster_id, cluster_col, feature_cols, p_low=0.05, p_high=0.95):
+def compute_cluster_percentiles(
+    df,
+    cluster_id,
+    cluster_col,
+    feature_cols,
+    p_low=0.05,
+    p_high=0.95
+):
     """
-    Computes the p_low and p_high percentiles for each feature in feature_cols,
-    among rows with cluster_col == cluster_id.
-    Returns a dict: { feature_name -> (p5_value, p95_value) }.
+    Among rows with cluster_col == cluster_id, compute p_low and p_high percentiles
+    for each feature in feature_cols. Returns { feature -> (p5_val, p95_val) }.
     """
     df_filtered = df.filter(F.col(cluster_col) == cluster_id)
 
-    # Build exprs for each numeric feature
     agg_exprs = []
     for fcol in feature_cols:
         agg_exprs.append(
@@ -168,21 +166,29 @@ def compute_cluster_percentiles(df, cluster_id, cluster_col, feature_cols, p_low
     return stats_dict
 
 
-def build_feature_insight(feature_name, feature_value, category, p5=None, p95=None):
+def build_feature_insight(
+    feature_name,
+    feature_value,
+    category,
+    row_values,
+    cluster_percentiles,
+    aum_snippet_done=False
+):
     """
     Returns a text snippet about a single feature, depending on its category.
+    If category == 'aum', ALWAYS reference 'aum_dollars' from row_values 
+    and p5/p95 from cluster_percentiles['aum_dollars']. 
+    Also adds dollar sign with thousands separators.
 
-    category can be: "exclude", "segment", "product", "aum", "numeric", etc.
-    p5/p95 are the 5%/95% percentile if needed for numeric or aum features.
+    'aum_snippet_done': pass True if we already created an AUM snippet, so we skip further AUM text.
     """
 
-    # 1) If "exclude", skip
+    # 1) If exclude, skip
     if category == "exclude":
         return ""
 
-    # 2) segment
+    # 2) Segment
     if category == "segment":
-        # If feature_value > 0.5 => "This household is b__affluent" or custom logic
         if feature_value > 0.5:
             if feature_name == "f__emerging":
                 return "This household is emerging."
@@ -192,66 +198,82 @@ def build_feature_insight(feature_name, feature_value, category, p5=None, p95=No
                 return "This household is high net worth."
             elif feature_name == "d__very_high_net_worth":
                 return "This household is very high net worth."
-        # If 0 => skip
         return ""
 
-    # 3) product
+    # 3) Product
     if category == "product":
         if feature_value > 0.5:
             return f"This household has opened {feature_name} product."
         else:
             return f"This household has not opened {feature_name} product."
 
-    # 4) aum
+    # 4) AUM => always reference aum_dollars, ignoring current feature_name
     if category == "aum":
+        # If we already created an AUM snippet, we skip or produce empty
+        if aum_snippet_done:
+            return ""  # skip duplicates
+        aum_val = row_values.get("aum_dollars", 0.0)
+        p5, p95 = cluster_percentiles.get("aum_dollars", (None, None))
         if p5 is not None and p95 is not None:
-            return (f"The household has AUM of {feature_value:.2f}. "
-                    f"Typical AUM in this cluster is between {p5:.2f} and {p95:.2f}.")
+            return (
+                f"The household has AUM of ${aum_val:,.2f}. "
+                f"Typical AUM in this cluster is between ${p5:,.2f} and ${p95:,.2f}."
+            )
         else:
-            return f"The household has AUM of {feature_value:.2f}."
+            return f"The household has AUM of ${aum_val:,.2f}."
 
     # 5) numeric
     if category == "numeric":
+        p5, p95 = cluster_percentiles.get(feature_name, (None, None))
         if p5 is not None and p95 is not None:
-            return (f"The household's {feature_name} is {feature_value:.2f}. "
-                    f"Similar PWM households in this cluster have {feature_name} "
-                    f"between {p5:.2f} and {p95:.2f}.")
+            return (
+                f"The household's {feature_name} is ${feature_value:,.2f}. "
+                f"Similar PWM households in this cluster have {feature_name} "
+                f"between ${p5:,.2f} and ${p95:,.2f}."
+            )
         else:
-            return f"The household's {feature_name} is {feature_value:.2f}."
+            return f"The household's {feature_name} is ${feature_value:,.2f}."
 
-    # 6) fallback
-    return f"{feature_name} => {feature_value:.2f}"
+    # fallback
+    return f"{feature_name} => ${feature_value:,.2f}"
 
 
-def generate_insight_string(top_features, row_values, cluster_percentiles, feature_categories):
+def generate_insight_string(
+    top_features,
+    row_values,
+    cluster_percentiles,
+    feature_categories
+):
     """
     Builds a single insight string for one prospect row,
-    based on top_features, a row_values dict, and the cluster's p5/p95 stats.
-
-    top_features: list of (feature_name, importance) sorted descending
-    row_values  : dict { feature -> prospect's numeric value }
-    cluster_percentiles : dict { feature -> (p5_val, p95_val) }
-    feature_categories : dict from config ( feature_name -> "segment"/"aum"/"product"/"numeric"/"exclude" )
+    referencing 'aum_dollars' if the category is 'aum'. 
+    We skip repeated AUM snippets if multiple aum features appear in top_features.
     """
-
     lines = []
+    aum_snippet_done = False
+
     for (feat, _imp) in top_features:
         cat = feature_categories.get(feat, "numeric")
-
-        # if "exclude", skip
-        if cat == "exclude":
-            continue
-
         val = row_values.get(feat, 0.0) or 0.0
-        p5, p95 = cluster_percentiles.get(feat, (None, None))
 
-        snippet = build_feature_insight(feat, val, cat, p5, p95)
+        snippet = build_feature_insight(
+            feature_name=feat,
+            feature_value=val,
+            category=cat,
+            row_values=row_values,
+            cluster_percentiles=cluster_percentiles,
+            aum_snippet_done=aum_snippet_done
+        )
         snippet = snippet.strip()
         if snippet:
             lines.append(snippet)
 
-    # combine them
+        # If we just produced an aum snippet, mark aum_snippet_done=True
+        if cat == "aum" and snippet != "":
+            aum_snippet_done = True
+
     return " | ".join(lines)
+
 
 
 
@@ -261,14 +283,14 @@ def generate_insight_string(top_features, row_values, cluster_percentiles, featu
 
 import sys
 import pyspark.sql.functions as F
-from pyspark.sql.types import StringType, StructType
+from pyspark.sql.types import StringType
 from pyspark.sql import SparkSession
 
 from optimal_spark_config.create_spark_instance import generate_spark_instance
 from HiveIO.config import get_config, get_schema
 from HiveIO.io import set_data_config
 
-# Import from your new insight_pipeline.py
+# Import from your new insight_pipeline
 from private_wealth_retention.consumer_prospecting.model.insight_pipeline import (
     train_cluster_insight_model,
     compute_cluster_percentiles,
@@ -278,36 +300,27 @@ from private_wealth_retention.consumer_prospecting.model.insight_pipeline import
 def main():
     spark = generate_spark_instance(total_memory=600, total_vcpu=300)
 
-    # 1) Load config & schema
-    # adjust references if needed
+    # 1) Load config, schema, etc.
     cfg = get_config(None, "config.yaml")
     schema = get_schema(None, "schema.yml")
     db_name = schema["databases"][0]["name"]
     business_date = cfg["dates"]["business_date"]
 
-    # For example, we assume the config has "feature_categories" nested like:
-    # cfg["feature_categories"] = { ... } 
-    feature_categories = cfg["feature_categories"]
+    feature_categories = cfg["feature_categories"]  # the big mapping from your config
+    all_features = cfg["features"]["all_numeric_cols"]  # e.g. or however you list your features
 
     # 2) Table references
     prospects_table = f"{db_name}.prospects_all"
     pwm_table = f"{db_name}.pwm_clusters_all"
     features_table = cfg["tables"]["prospecting_features"]
 
-    # 3) Load the data
+    # 3) Load data
     load_data_from, get_table_partitions, _, _ = set_data_config(spark, cfg)
-
     df_prospects_base = load_data_from(prospects_table)
     df_pwm_base = load_data_from(pwm_table)
-    # big features table
     df_features = load_data_from(features_table).filter(F.col("business_date") == business_date)
 
-    # 4) Identify numeric feature columns
-    # For example, you can gather them from config or discover them in the feature table
-    # Here, let's assume you have a list:
-    all_features = list(cfg["features"]["all_numeric_cols"])  # or something similar
-
-    # Join prospects & PWM minimal data with the actual feature data
+    # 4) Join with actual numeric columns
     df_prospects = df_prospects_base.join(
         df_features.select("hh_id_in_wh", *all_features),
         on="hh_id_in_wh",
@@ -319,16 +332,17 @@ def main():
         how="left"
     )
 
-    # 5) Gather distinct cluster_ids
+    # 5) Distinct cluster_ids
     cluster_ids = [
-        row["cluster_id"] for row in df_prospects.select("cluster_id").distinct().collect()
+        row["cluster_id"]
+        for row in df_prospects.select("cluster_id").distinct().collect()
     ]
 
     union_df = None
 
-    # 6) For each cluster, train "cluster vs. rest," compute p5/p95 among PWM, build insights
+    # 6) For each cluster
     for c_id in cluster_ids:
-        # a) train cluster-insight model
+        # a) train cluster-insight model => pick top features
         feature_importances = train_cluster_insight_model(
             df=df_prospects,
             cluster_col="cluster_id",
@@ -339,43 +353,45 @@ def main():
             num_trees=50,
             max_depth=5
         )
-        # pick top 5
         top_5_features = feature_importances[:5]
 
-        # b) compute 5% / 95% among the PWM for cluster c_id
+        # b) compute 5–95% among PWM
+        #    We only need p5/p95 for the features in top_5, *plus* "aum_dollars" if it's not there
+        #    because we might always need cluster_percentiles["aum_dollars"] if any AUM feature appears
+        needed_features = set([f for (f, imp) in top_5_features])
+        needed_features.add("aum_dollars")  # ensure we have it for AUM references
+        needed_features = list(needed_features)
+
         cluster_percentiles = compute_cluster_percentiles(
             df=df_pwm,
             cluster_id=c_id,
             cluster_col="cluster_id",
-            feature_cols=[feat for (feat, imp) in top_5_features]
+            feature_cols=needed_features
         )
 
-        # c) filter this cluster's prospects
+        # c) filter prospects in this cluster
         df_cluster = df_prospects.filter(F.col("cluster_id") == c_id)
 
-        # d) Collect them to driver, build "insight" string locally
+        # d) Collect them & build insight
         local_rows = df_cluster.collect()
         new_data = []
         for row in local_rows:
             row_dict = row.asDict()
-            # build a "row_values" dict: {feature -> value}
+            # build row_values
             row_values = {}
             for feat in all_features:
                 row_values[feat] = row_dict.get(feat, 0.0) or 0.0
 
-            # generate the insight
-            # generate_insight_string needs top_features=(feat, imp) and cluster_percentiles
-            insight_text = generate_insight_string(
+            insight_str = generate_insight_string(
                 top_features=top_5_features,
                 row_values=row_values,
                 cluster_percentiles=cluster_percentiles,
                 feature_categories=feature_categories
             )
-
-            row_dict["insight"] = insight_text
+            row_dict["insight"] = insight_str
             new_data.append(row_dict)
 
-        # e) Build a new Spark DF with the new "insight" column
+        # e) Convert back to Spark DF
         new_schema = df_cluster.schema.add("insight", StringType())
         df_cluster_with_insight = spark.createDataFrame(new_data, schema=new_schema)
 
@@ -395,11 +411,11 @@ def main():
         "insight",
         "business_date"
     ]
-    # Adjust if your actual columns differ
-    df_insight = union_df.select(*[F.col(c) for c in final_cols if c in union_df.columns])
+    # only select columns that exist
+    existing_cols = [c for c in final_cols if c in union_df.columns]
+    df_insight = union_df.select(*[F.col(c) for c in existing_cols])
 
-    # 8) Write final or do next steps
-    # e.g.
+    # 8) write final
     # df_insight.write.saveAsTable(f"{db_name}.prospect_insights", mode="overwrite")
 
     spark.stop()
