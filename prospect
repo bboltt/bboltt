@@ -1,0 +1,93 @@
+feature_categories:
+  checking: "product"
+  credit_card: "product"
+  money_market: "product"
+  aum_dollars: "aum"
+  c__2mm_to__5mm: "aum"
+  b__500k_to_2_mm: "aum"
+  bal_amt_sum: "numeric"
+  bal_amt_mean: "numeric"
+  transaction_sum_1_month: "numeric"
+  # etc.
+
+
+import pyspark.sql.functions as F
+
+# Example aggregator using percentile_approx for numeric columns
+df_pwm_clustered.groupBy("cluster_id").agg(
+    F.expr("percentile_approx(bal_amt_sum, 0.05)").alias("bal_amt_sum_p5"),
+    F.expr("percentile_approx(bal_amt_sum, 0.95)").alias("bal_amt_sum_p95"),
+    ...
+)
+
+
+
+
+
+def build_feature_insight(
+    feature_name: str,
+    feature_value: float,
+    category: str,
+    p5: float = None,
+    p95: float = None
+) -> str:
+    """
+    Returns a text snippet about this feature, depending on its category.
+    'p5' and 'p95' are the 5% and 95% percentiles for that cluster.
+    """
+
+    if category == "product":
+        # Suppose feature_value is 1 => has product, 0 => doesn't have
+        if feature_value > 0.5:
+            return f"This household has opened {feature_name} product."
+        else:
+            return f"This household does not have {feature_name} product."
+
+    elif category == "aum":
+        # We show the numeric value, plus the cluster 5% & 95% range
+        return (
+            f"The household has AUM of {feature_value:.2f}. "
+            f"It is categorized with existing PWM who typically have AUM between {p5:.2f} and {p95:.2f}."
+        )
+
+    elif category == "numeric":
+        # any other numeric feature 
+        return (
+            f"The household has an average of {feature_name} of {feature_value:.2f}. "
+            f"It is grouped with existing PWM who have {feature_name} between {p5:.2f} and {p95:.2f}."
+        )
+
+    else:
+        # fallback if not mapped
+        return f"{feature_name} = {feature_value:.2f} (No specific insight format)."
+
+
+
+for i, (feat, imp) in enumerate(top_5_features):
+    val = row_values[feat]
+    mean_val, std_val = cluster_stats[feat]
+    # old code with mean ± 2 std => replaced
+    ...
+
+
+
+feature_categories = cfg["feature_categories"]  # loaded from YAML
+
+insight_parts = []
+for feat, imp in top_5_features:  # or however you pick features
+    cat = feature_categories.get(feat, "numeric")  # default to numeric
+    val = row_values.get(feat, 0.0)
+
+    if cat in ["aum", "numeric"]:
+        # look up p5, p95 from some dictionary you built, e.g. cluster_percentiles[feat] = (p5, p95)
+        p5, p95 = cluster_percentiles[feat]
+        snippet = build_feature_insight(feat, val, cat, p5, p95)
+    elif cat == "product":
+        snippet = build_feature_insight(feat, val, cat)
+    else:
+        # fallback 
+        snippet = build_feature_insight(feat, val, "other")
+
+    insight_parts.append(snippet)
+
+insight_str = " | ".join(insight_parts)
