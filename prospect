@@ -1,77 +1,87 @@
-feature_categories:
-  # 1) Exclude columns
-  hh_id_in_wh: "exclude"
-  business_date: "exclude"
-  consumer_pwm: "exclude"
+feature_human_labels = {
+    # --- Excluded columns (no human label needed if you skip them) ---
+    # "hh_id_in_wh": "exclude",
+    # "business_date": "exclude",
+    # "consumer_pwm": "exclude",
 
-  # 2) Segment features
-  f__emerging: "segment"
-  b__affluent: "segment"
-  c__high_net_worth: "segment"
-  d__very_high_net_worth: "segment"
+    # --- Segment Features ---
+    "f__emerging": "the emerging wealth segment",
+    "b__affluent": "the affluent segment",
+    "c__high_net_worth": "the high net worth segment",
+    "d__very_high_net_worth": "the very high net worth segment",
 
-  # 3) AUM features
-  aum_dollars: "aum"
-  b__500k_to__2_mm: "aum"
-  c__2mm_to__5mm: "aum"
-  d__5mm_to__10mm: "aum"
-  e__10mm_to__25mm: "aum"
+    # --- AUM / Wealth Tier Features ---
+    "aum_dollars": "AUM dollars",
+    "b__500k_to__2_mm": "the $500k–$2mm wealth tier",
+    "c__2mm_to__5mm": "the $2mm–$5mm wealth tier",
+    "d__5mm_to__10mm": "the $5mm–$10mm wealth tier",
+    "e__10mm_to__25mm": "the $10mm–$25mm wealth tier",
+    "f__emerging": "the emerging wealth tier",
+    "b__affluent": "the affluent tier",
+    "c__high_net_worth": "the high net worth tier",
+    "d__very_high_net_worth": "the very high net worth tier",
 
-  # 4) Product features (1/0 for has/doesn't have)
-  checking: "product"
-  commercial_line_of_credit: "product"
-  commercial_term_loan: "product"
-  credit_card: "product"
-  heloan: "product"
-  heloc: "product"
-  money_market: "product"
-  other: "product"
-  prime_time_checking: "product"
-  private_wealth_cd: "product"
-  regions_wealth_account: "product"
-  regular_cd: "product"
-  sbl: "product"
-  small_business_cd: "product"
-  unsecured_line: "product"
+    # --- Product Features ---
+    "checking": "a checking product",
+    "commercial_line_of_credit": "a commercial line of credit",
+    "commercial_term_loan": "a commercial term loan",
+    "credit_card": "a credit card",
+    "heloan": "a home equity loan",
+    "heloc": "a home equity line of credit",
+    "money_market": "a money market account",
+    "other": "another product type",
+    "prime_time_checking": "a prime time checking product",
+    "private_wealth_cd": "a private wealth CD product",
+    "regions_wealth_account": "a Regions wealth account",
+    "regular_cd": "a regular CD product",
+    "sbl": "a small business loan (SBL)",
+    "small_business_cd": "a small business CD",
+    "unsecured_line": "an unsecured line of credit",
 
-  # 5) Numeric features (using 5%/95% percentiles for insight)
-  bal_amt_sum: "numeric"
-  bal_amt_mean: "numeric"
-  bal_amt_max: "numeric"
-  bal_amt_min: "numeric"
-  bal_amt_std: "numeric"
+    # --- Numeric Balance / Ledger Features ---
+    "bal_amt_sum": "the total balance across all accounts",
+    "bal_amt_mean": "the average balance across all accounts",
+    "bal_amt_max": "the maximum balance across all accounts",
+    "bal_amt_min": "the minimum balance across all accounts",
+    "bal_amt_std": "the standard deviation of balances",
 
-  ledger_bal_amt_sum: "numeric"
-  ledger_bal_amt_mean: "numeric"
-  ledger_bal_amt_std: "numeric"
-  ledger_bal_amt_max: "numeric"
-  ledger_bal_amt_min: "numeric"
+    "ledger_bal_amt_sum": "the total ledger balance across all accounts",
+    "ledger_bal_amt_mean": "the average ledger balance across all accounts",
+    "ledger_bal_amt_std": "the standard deviation of ledger balances",
+    "ledger_bal_amt_max": "the maximum ledger balance across all accounts",
+    "ledger_bal_amt_min": "the minimum ledger balance across all accounts",
 
-  transaction_in_sum_1_month: "numeric"
-  transaction_in_max_1_month: "numeric"
-  transaction_in_count: "numeric"
-  transaction_out_sum_1_month: "numeric"
-  transaction_out_max_1_month: "numeric"
-  transaction_out_count: "numeric"
+    # --- Transaction Features ---
+    "transaction_in_sum_1_month": "the total inbound transactions in the past month",
+    "transaction_in_max_1_month": "the maximum inbound transaction in the past month",
+    "transaction_in_count": "the count of inbound transactions",
+    "transaction_out_sum_1_month": "the total outbound transactions in the past month",
+    "transaction_out_max_1_month": "the maximum outbound transaction in the past month",
+    "transaction_out_count": "the count of outbound transactions",
 
-  arrangement_count: "numeric"
-  product_diversity: "numeric"
-  state_count: "numeric"
-  balance_trend: "numeric"
+    # --- Arrangement / Diversity / Count Features ---
+    "arrangement_count": "the arrangement count",
+    "product_diversity": "the product diversity score",
+    "state_count": "the number of states associated with this household",
+    "balance_trend": "the balance change over the previous month",
 
-  recent_opened_counts_30d: "numeric"
-  recent_opened_counts_90d: "numeric"
-  recent_opened_counts_180d: "numeric"
-  recent_opened_counts_365d: "numeric"
-  recent_opened_counts_730d: "numeric"
+    # --- Recent Opened / Closed Features ---
+    "recent_opened_counts_30d": "the number of accounts opened in the last 30 days",
+    "recent_opened_counts_90d": "the number of accounts opened in the last 90 days",
+    "recent_opened_counts_180d": "the number of accounts opened in the last 180 days",
+    "recent_opened_counts_365d": "the number of accounts opened in the last 365 days",
+    "recent_opened_counts_730d": "the number of accounts opened in the last 730 days",
 
-  recent_closed_counts_30d: "numeric"
-  recent_closed_counts_90d: "numeric"
-  recent_closed_counts_180d: "numeric"
-  recent_closed_counts_365d: "numeric"
-  recent_closed_counts_730d: "numeric"
+    "recent_closed_counts_30d": "the number of accounts closed in the last 30 days",
+    "recent_closed_counts_90d": "the number of accounts closed in the last 90 days",
+    "recent_closed_counts_180d": "the number of accounts closed in the last 180 days",
+    "recent_closed_counts_365d": "the number of accounts closed in the last 365 days",
+    "recent_closed_counts_730d": "the number of accounts closed in the last 730 days",
 
-  hh_longevity: "numeric"
+    # --- Other / Longevity ---
+    "hh_longevity": "the household longevity in days"
+}
+
 
 
 
