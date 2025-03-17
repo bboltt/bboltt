@@ -83,6 +83,223 @@ feature_human_labels = {
 }
 
 
+# insight_pipeline.py
+
+import pyspark.sql.functions as F
+from pyspark.ml.feature import VectorAssembler
+from pyspark.ml.classification import RandomForestClassifier
+from pyspark.ml import Pipeline
+
+def train_cluster_insight_model(
+    df,
+    cluster_col,
+    cluster_id,
+    feature_cols,
+    label_col="label",
+    seed=42,
+    num_trees=50,
+    max_depth=5
+):
+    """
+    Train a 'cluster vs. rest' RandomForest to find which features matter 
+    for cluster_id vs. other clusters.
+    Returns a sorted list of (feature, importance).
+    """
+    df_labeled = df.withColumn(
+        label_col,
+        F.when(F.col(cluster_col) == cluster_id, 1.0).otherwise(0.0)
+    )
+
+    assembler = VectorAssembler(
+        inputCols=feature_cols,
+        outputCol="features",
+        handleInvalid="skip"
+    )
+    rf = RandomForestClassifier(
+        labelCol=label_col,
+        featuresCol="features",
+        numTrees=num_trees,
+        maxDepth=max_depth,
+        seed=seed
+    )
+
+    pipeline = Pipeline(stages=[assembler, rf])
+    model = pipeline.fit(df_labeled)
+
+    rf_model = model.stages[-1]  # random forest model
+    importances = rf_model.featureImportances.toArray()
+    feature_importance_pairs = list(zip(feature_cols, importances))
+    feature_importance_pairs.sort(key=lambda x: x[1], reverse=True)
+
+    return feature_importance_pairs
+
+def generate_insight_string_simple(top_features, feature_human_labels):
+    """
+    Instead of numeric values or ranges, produce a short sentence 
+    listing the 'human-friendly' labels for each top feature.
+
+    e.g. "The household is selected because of AUM dollars, 
+          the balance change over the previous month, 
+          and the sum of balances in all accounts."
+    """
+    # Only keep the feature names that actually have > 0 importance
+    # (some might be zero if random forest doesn't use them)
+    relevant_features = [f for (f, imp) in top_features if imp > 0]
+
+    # Convert each feature name to a human-friendly phrase
+    labels = []
+    for feat in relevant_features:
+        if feat in feature_human_labels:
+            labels.append(feature_human_labels[feat])
+        else:
+            # fallback to raw name
+            labels.append(feat.replace("_", " "))
+
+    if not labels:
+        return "The household is selected, but no significant features were found."
+
+    # Build a single sentence with commas + "and"
+    # e.g. "A, B, and C" 
+    if len(labels) == 1:
+        label_str = labels[0]
+    elif len(labels) == 2:
+        label_str = f"{labels[0]} and {labels[1]}"
+    else:
+        # multiple => separate by commas, last item with "and"
+        label_str = ", ".join(labels[:-1]) + ", and " + labels[-1]
+
+    return f"The household is selected because of {label_str}."
+
+#!/usr/bin/env python
+# run_insight.py
+
+import sys
+import pyspark.sql.functions as F
+from pyspark.sql.types import StringType
+from pyspark.sql import SparkSession
+
+from optimal_spark_config.create_spark_instance import generate_spark_instance
+from HiveIO.config import get_config, get_schema
+from HiveIO.io import set_data_config
+
+# Import your new pipeline
+from private_wealth_retention.consumer_prospecting.model.insight_pipeline import (
+    train_cluster_insight_model,
+    generate_insight_string_simple
+)
+
+def main():
+    spark = generate_spark_instance(total_memory=600, total_vcpu=300)
+
+    cfg = get_config(None, "config.yaml")
+    schema = get_schema(None, "schema.yml")
+    db_name = schema["databases"][0]["name"]
+    business_date = cfg["dates"]["business_date"]
+
+    # Suppose we have a dictionary of human-friendly labels.
+    # You can store this in config.yaml or define it here:
+    feature_human_labels = {
+        "aum_dollars": "AUM dollars",
+        "bal_amt_sum": "the sum of balance in all accounts",
+        "bal_amt_mean": "the average balance of all accounts",
+        "bal_amt_max": "the maximum balance across all accounts",
+        "balance_trend": "the balance change over the previous month",
+        "b__affluent": "its affluent segment",
+        "c__high_net_worth": "its high net worth segment",
+        # ...
+    }
+
+    # If config has them, do e.g. feature_human_labels = cfg["feature_human_labels"]
+
+    all_features = cfg["features"]["all_numeric_cols"]  # or wherever you store them
+
+    # 2) Table references
+    prospects_table = f"{db_name}.prospects_all"
+    pwm_table = f"{db_name}.pwm_clusters_all"  # might not even need PWM now if we skip stats
+    features_table = cfg["tables"]["prospecting_features"]
+
+    # 3) Load data
+    load_data_from, get_table_partitions, _, _ = set_data_config(spark, cfg)
+    df_prospects_base = load_data_from(prospects_table)
+    # If you no longer need PWM data for stats, skip it or keep if you do something else.
+    # df_pwm_base = load_data_from(pwm_table)
+    df_features = load_data_from(features_table).filter(F.col("business_date") == business_date)
+
+    # 4) Join with numeric columns
+    df_prospects = df_prospects_base.join(
+        df_features.select("hh_id_in_wh", *all_features),
+        on="hh_id_in_wh",
+        how="left"
+    )
+
+    # 5) distinct cluster_ids
+    cluster_ids = [
+        row["cluster_id"]
+        for row in df_prospects.select("cluster_id").distinct().collect()
+    ]
+
+    union_df = None
+
+    for c_id in cluster_ids:
+        # a) train cluster-insight model => pick top features
+        feature_importances = train_cluster_insight_model(
+            df=df_prospects,
+            cluster_col="cluster_id",
+            cluster_id=c_id,
+            feature_cols=all_features,
+            label_col="label",
+            seed=42,
+            num_trees=50,
+            max_depth=5
+        )
+        top_5_features = feature_importances[:5]
+
+        # b) filter prospects in this cluster
+        df_cluster = df_prospects.filter(F.col("cluster_id") == c_id)
+
+        # c) collect => build insight
+        local_rows = df_cluster.collect()
+        new_data = []
+        for row in local_rows:
+            row_dict = row.asDict()
+
+            # no need for row_values or stats => we only produce a sentence referencing top features
+            insight_str = generate_insight_string_simple(
+                top_5_features,
+                feature_human_labels
+            )
+            row_dict["insight"] = insight_str
+            new_data.append(row_dict)
+
+        # d) create new DF with insight col
+        new_schema = df_cluster.schema.add("insight", StringType())
+        df_cluster_with_insight = spark.createDataFrame(new_data, schema=new_schema)
+
+        if union_df is None:
+            union_df = df_cluster_with_insight
+        else:
+            union_df = union_df.union(df_cluster_with_insight)
+
+    # final columns
+    final_cols = [
+        "hh_id_in_wh",
+        "similarity_score",
+        "distance_to_center",
+        "prospect_segment",
+        "cluster_id",
+        "insight",
+        "business_date"
+    ]
+    existing_cols = [c for c in final_cols if c in union_df.columns]
+    df_insight = union_df.select(*existing_cols)
+
+    # write final
+    # df_insight.write.saveAsTable(f"{db_name}.prospect_insights", mode="overwrite")
+
+    spark.stop()
+
+if __name__ == "__main__":
+    main()
 
 
 # insight_pipeline.py
