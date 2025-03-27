@@ -3,10 +3,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix, classification_report
 
-# ------------------------------
+# ===============================
 # 1. Data Preparation
-# ------------------------------
-# Assuming your dataframe is loaded as df_master_transaction
+# ===============================
+# Assume your dataframe is loaded as df_master_transaction
 df = df_master_transaction.copy()
 
 # Convert date columns to datetime
@@ -17,48 +17,25 @@ df['attrition_date'] = pd.to_datetime(df['attrition_date'], errors='coerce')
 df.sort_values(['ip_id', 'month_end_date'], inplace=True)
 df.reset_index(drop=True, inplace=True)
 
-# ------------------------------
-# 2. Filter Data Prior to Attrition Date
-# ------------------------------
-# For each record, if attrition_date is known, only include data with month_end_date < attrition_date.
-# For non-attrited users (where attrition_date might be NaT), keep all records.
+# Filter the data: use only months before attrition_date (for users with attrition) 
 df = df[df.apply(lambda row: (pd.isna(row['attrition_date']) or (row['month_end_date'] < row['attrition_date'])), axis=1)]
 
-# ------------------------------
-# 3. Identify Count and Amount Columns
-# ------------------------------
-# Exclude columns that are not part of the analysis
-exclude_cols = ['hh_id_in_wh', 'segment']
-
-# For count columns, we assume they start with "num_" (per your screenshot)
-count_cols = [col for col in df.columns 
-              if col.startswith("num_") and col not in exclude_cols and col not in ['ip_id', 'attrition_label', 'month_end_date', 'attrition_date']]
-
-# For amount columns, we assume they contain "amt" somewhere in the name
-amount_cols = [col for col in df.columns 
-               if ("amt" in col) and col not in exclude_cols and col not in ['attrition_label', 'attrition_date']]
-
-# Create overall totals for broader signal analysis
-df['total_count'] = df[count_cols].sum(axis=1)
-df['total_amount'] = df[amount_cols].sum(axis=1)
-
-# ------------------------------
-# 4. Helper Functions for Feature Engineering
-# ------------------------------
+# ===============================
+# 2. Helper Functions
+# ===============================
 def add_lag_and_pct_change(df, group_col, col, lag=1):
     """
-    For each user (group_col), create a lag feature of 'col' and calculate the percentage change.
+    For each user (group_col), create a lag feature of `col` and compute the percentage change.
     """
     df[f'lag_{col}'] = df.groupby(group_col)[col].shift(lag)
     df[f'{col}_pct_change'] = (df[col] - df[f'lag_{col}']) / df[f'lag_{col}']
-    # Replace infinities and handle division by zero
     df[f'{col}_pct_change'].replace([np.inf, -np.inf], np.nan, inplace=True)
     return df
 
 def add_rolling_recovery(df, group_col, col, window=3):
     """
-    For each user, compute the maximum value in the next 'window' months.
-    'Recovery' is defined as reaching or exceeding the previous month's (lag) value.
+    For each user, compute the maximum value in the next `window` months.
+    Recovery is defined as reaching or exceeding the previous month's (lag) value.
     """
     def rolling_max_next_n(series):
         return series.shift(-1).rolling(window=window, min_periods=1).max()
@@ -66,85 +43,82 @@ def add_rolling_recovery(df, group_col, col, window=3):
     df[f'{col}_recovered'] = df[f'{col}_max_next_{window}'] >= df[f'lag_{col}']
     return df
 
-# ------------------------------
-# 5. Implementing Candidate Attrition Rules
-# ------------------------------
-
-# --- Rule 1: ACH Incoming Drop ---
-# Based on your screenshot, assume the ACH incoming count column is named "num_ach_incoming"
-col_ach_count = "num_ach_incoming"  # adjust if necessary
+# ===============================
+# 3. Candidate Rule A: ACH Incoming Count Drop
+# ===============================
+# We assume the ACH incoming count column is named "num_ach_incoming"
+col_ach_count = "num_ach_incoming"
 if col_ach_count in df.columns:
-    df = add_lag_and_pct_change(df, group_col='ip_id', col=col_ach_count)
-    df = add_rolling_recovery(df, group_col='ip_id', col=col_ach_count, window=3)
-    # Flag when ACH incoming drops by 50% or more and does not recover within 3 months
-    df['rule_ach_drop'] = ((df[f'{col_ach_count}_pct_change'] <= -0.50) &
-                           (df[f'{col_ach_count}_recovered'] == False)).astype(int)
+    df_rule_A = df.copy()
+    df_rule_A = add_lag_and_pct_change(df_rule_A, group_col='ip_id', col=col_ach_count)
+    df_rule_A = add_rolling_recovery(df_rule_A, group_col='ip_id', col=col_ach_count, window=3)
+    # Flag when ACH incoming count drops ≥ 50% and does not recover in 3 months.
+    df_rule_A['rule_A_flag'] = ((df_rule_A[f'{col_ach_count}_pct_change'] <= -0.50) &
+                                 (df_rule_A[f'{col_ach_count}_recovered'] == False)).astype(int)
+    
+    print("=== Candidate Rule A: ACH Incoming Count Drop ===")
+    print(confusion_matrix(df_rule_A['attrition_label'], df_rule_A['rule_A_flag']))
+    print(classification_report(df_rule_A['attrition_label'], df_rule_A['rule_A_flag']))
 else:
     print(f"Column {col_ach_count} not found in dataframe.")
 
-# --- Rule 2: Total Transaction Count Drop ---
-col_total_count = "total_count"
-df = add_lag_and_pct_change(df, group_col='ip_id', col=col_total_count)
-df = add_rolling_recovery(df, group_col='ip_id', col=col_total_count, window=3)
-# Flag when total transaction count drops by 40% or more with no recovery
-df['rule_total_count_drop'] = ((df[f'{col_total_count}_pct_change'] <= -0.40) &
-                               (df[f'{col_total_count}_recovered'] == False)).astype(int)
-
-# --- Rule 3: Zelle Credit Drop ---
-# Assume the Zelle credit count column is named "num_zelle_credit" based on your screenshot
-col_zelle_credit = "num_zelle_credit"  # adjust if needed
-if col_zelle_credit in df.columns:
-    df = add_lag_and_pct_change(df, group_col='ip_id', col=col_zelle_credit)
-    df = add_rolling_recovery(df, group_col='ip_id', col=col_zelle_credit, window=3)
-    # Flag when Zelle credit drops by 40% or more with no recovery
-    df['rule_zelle_drop'] = ((df[f'{col_zelle_credit}_pct_change'] <= -0.40) &
-                             (df[f'{col_zelle_credit}_recovered'] == False)).astype(int)
+# ===============================
+# 4. Candidate Rule B: ACH Incoming Amount Drop
+# ===============================
+# We assume the ACH incoming amount column is named "ach_incoming_amt"
+col_ach_amt = "ach_incoming_amt"
+if col_ach_amt in df.columns:
+    df_rule_B = df.copy()
+    df_rule_B = add_lag_and_pct_change(df_rule_B, group_col='ip_id', col=col_ach_amt)
+    df_rule_B = add_rolling_recovery(df_rule_B, group_col='ip_id', col=col_ach_amt, window=3)
+    # Flag when ACH incoming amount drops ≥ 50% and does not recover within 3 months.
+    df_rule_B['rule_B_flag'] = ((df_rule_B[f'{col_ach_amt}_pct_change'] <= -0.50) &
+                                 (df_rule_B[f'{col_ach_amt}_recovered'] == False)).astype(int)
+    
+    print("=== Candidate Rule B: ACH Incoming Amount Drop ===")
+    print(confusion_matrix(df_rule_B['attrition_label'], df_rule_B['rule_B_flag']))
+    print(classification_report(df_rule_B['attrition_label'], df_rule_B['rule_B_flag']))
 else:
-    print(f"Column {col_zelle_credit} not found in dataframe.")
+    print(f"Column {col_ach_amt} not found in dataframe.")
 
-# ------------------------------
-# 6. Combine the Rules into a Final Attrition Alert
-# ------------------------------
-# For this example, if any one of the rules is triggered in a month for a user, we flag an alert.
-df['attrition_alert'] = ((df.get('rule_ach_drop', 0) == 1) | 
-                         (df['rule_total_count_drop'] == 1) |
-                         (df.get('rule_zelle_drop', 0) == 1)).astype(int)
+# ===============================
+# 5. Candidate Rule C: Zelle Credit Count Drop
+# ===============================
+# We assume the Zelle credit count column is named "num_zelle_credit"
+col_zelle_count = "num_zelle_credit"
+if col_zelle_count in df.columns:
+    df_rule_C = df.copy()
+    df_rule_C = add_lag_and_pct_change(df_rule_C, group_col='ip_id', col=col_zelle_count)
+    df_rule_C = add_rolling_recovery(df_rule_C, group_col='ip_id', col=col_zelle_count, window=3)
+    # Flag when Zelle credit count drops ≥ 40% and does not recover within 3 months.
+    df_rule_C['rule_C_flag'] = ((df_rule_C[f'{col_zelle_count}_pct_change'] <= -0.40) &
+                                 (df_rule_C[f'{col_zelle_count}_recovered'] == False)).astype(int)
+    
+    print("=== Candidate Rule C: Zelle Credit Count Drop ===")
+    print(confusion_matrix(df_rule_C['attrition_label'], df_rule_C['rule_C_flag']))
+    print(classification_report(df_rule_C['attrition_label'], df_rule_C['rule_C_flag']))
+else:
+    print(f"Column {col_zelle_count} not found in dataframe.")
 
-# ------------------------------
-# 7. Evaluation & Exploratory Analysis
-# ------------------------------
-# Evaluate rule performance against the actual attrition label
-cm = confusion_matrix(df['attrition_label'], df['attrition_alert'])
-print("Confusion Matrix:\n", cm)
-report = classification_report(df['attrition_label'], df['attrition_alert'])
-print("\nClassification Report:\n", report)
+# ===============================
+# 6. Candidate Rule D: Zelle Credit Amount Drop
+# ===============================
+# We assume the Zelle credit amount column is named "zelle_credit_incoming_amt"
+col_zelle_amt = "zelle_credit_incoming_amt"
+if col_zelle_amt in df.columns:
+    df_rule_D = df.copy()
+    df_rule_D = add_lag_and_pct_change(df_rule_D, group_col='ip_id', col=col_zelle_amt)
+    df_rule_D = add_rolling_recovery(df_rule_D, group_col='ip_id', col=col_zelle_amt, window=3)
+    # Flag when Zelle credit amount drops ≥ 40% and does not recover within 3 months.
+    df_rule_D['rule_D_flag'] = ((df_rule_D[f'{col_zelle_amt}_pct_change'] <= -0.40) &
+                                 (df_rule_D[f'{col_zelle_amt}_recovered'] == False)).astype(int)
+    
+    print("=== Candidate Rule D: Zelle Credit Amount Drop ===")
+    print(confusion_matrix(df_rule_D['attrition_label'], df_rule_D['rule_D_flag']))
+    print(classification_report(df_rule_D['attrition_label'], df_rule_D['rule_D_flag']))
+else:
+    print(f"Column {col_zelle_amt} not found in dataframe.")
 
-# Compare average percentage changes for key metrics by attrition label
-cols_to_check = []
-if col_ach_count in df.columns:
-    cols_to_check.append(f'{col_ach_count}_pct_change')
-cols_to_check.append(f'{col_total_count}_pct_change')
-if col_zelle_credit in df.columns:
-    cols_to_check.append(f'{col_zelle_credit}_pct_change')
-
-print("Average Percentage Changes by Attrition Label:")
-print(df.groupby('attrition_label')[cols_to_check].mean())
-
-# ------------------------------
-# 8. Visualization Example: Sample User Trend
-# ------------------------------
-if col_ach_count in df.columns:
-    sample_user = df['ip_id'].iloc[0]  # pick the first user
-    user_df = df[df['ip_id'] == sample_user]
-    plt.figure(figsize=(10,5))
-    plt.plot(user_df['month_end_date'], user_df[col_ach_count], marker='o', label='ACH Incoming')
-    plt.title(f'ACH Incoming Transactions Over Time for User {sample_user}')
-    plt.xlabel('Month End Date')
-    plt.ylabel('ACH Incoming Transactions')
-    plt.xticks(rotation=45)
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
 
 
 
