@@ -1,92 +1,84 @@
-import pyspark.sql.functions as F
-from pyspark.sql.window import Window
-from pyspark.sql.types import DoubleType
 import math
+import pyspark.sql.functions as F
+from pyspark.sql.types import DoubleType
+from pyspark.sql.window import Window
 
 def calculate_similarity_and_filter(
     spark,
-    df,             # large consumer DataFrame
+    df,             # Spark DF containing raw feature columns
     centers_df,     # Spark DF with columns: [cluster_id, features (array<double> in scaled space)]
-    minmax_model,   # The fitted MinMaxScalerModel from your clustering pipeline
-    feature_cols,   # list of feature columns that were scaled
-    max_dist_df     # or min_sim_df, whichever you use for filtering
+    data_min,       # from scikit-learn MinMaxScaler.data_min_
+    data_range,     # from scikit-learn MinMaxScaler.data_range_
+    feature_cols,   # list of feature names in the same order used in X
+    max_dist_df=None,  # optional Spark DF if you want to filter by max distance
+    distance_col="distance_to_center",  # name for distance
+    id_col="hh_id_in_wh"                # whichever unique ID you use for row partition
 ):
     """
-    1) Convert each row's raw features -> scaledFeatures using the MinMax formula:
-       scaled = (x - originalMin[i]) / (originalMax[i] - originalMin[i])
-    2) Cross-join with cluster centers => compute cos_similarity or distance.
-    3) Pick best cluster => filter if needed by max_dist, min_sim, etc.
+    1) For each row in df, replicate MinMax scaling => scaledFeatures
+    2) Cross join with centers_df => compute Euclidean distance or cos similarity
+    3) For each row, pick the cluster with the smallest distance (or highest similarity)
+    4) If max_dist_df is provided, join & filter by distance <= max_distance
+    5) Return the final DF with cluster_id and distance_col
     """
 
-    # 1) Retrieve the arrays from the MinMaxScalerModel
-    #    They are Spark ML Vectors => convert them to Python lists.
-    originalMin = minmax_model.originalMin.toArray()  # e.g. [min1, min2, ...]
-    originalMax = minmax_model.originalMax.toArray()  # e.g. [max1, max2, ...]
-
-    # Build expressions to scale each feature
+    # Step A: Build scaled columns in Spark
+    #   scaledVal = (rawVal - data_min[i]) / data_range[i]
     scaled_exprs = []
     for i, fcol in enumerate(feature_cols):
-        # range = originalMax[i] - originalMin[i]
-        range_i = originalMax[i] - originalMin[i]
+        range_i = float(data_range[i])
+        min_i = float(data_min[i])
         if range_i == 0.0:
-            # edge case: if max==min for that feature, fall back to 0 or handle it
+            # edge case: same min & max => all values become 0
             scaled_exprs.append(F.lit(0.0).alias(f"{fcol}_scaled"))
         else:
-            expr = (F.col(fcol) - F.lit(originalMin[i])) / F.lit(range_i)
+            expr = (F.col(fcol) - F.lit(min_i)) / F.lit(range_i)
             scaled_exprs.append(expr.alias(f"{fcol}_scaled"))
 
-    # Keep other columns from df. We'll add scaled columns.
-    all_non_feature_cols = [c for c in df.columns if c not in feature_cols]
+    # Keep other columns from df
+    other_cols = [c for c in df.columns if c not in feature_cols]
 
-    df_scaled = df.select(*all_non_feature_cols, *scaled_exprs)
+    df_scaled = df.select(*other_cols, *scaled_exprs)
 
-    # Combine scaled columns into an array for easier similarity calc
+    # Combine scaled columns into an array
     df_scaled = df_scaled.withColumn(
         "scaledFeatures",
-        F.array([F.col(f"{fcol}_scaled") for fcol in feature_cols])
+        F.array([F.col(f"{c}_scaled") for c in feature_cols])
     )
 
-    # define UDF for cos similarity or distance
+    # Step B: Define a UDF for Euclidean distance
     from pyspark.sql.functions import udf
-    from pyspark.sql.types import DoubleType
-
     @udf(DoubleType())
-    def cos_sim(v1, v2):
-        dot = 0.0
-        norm1 = 0.0
-        norm2 = 0.0
+    def euclidean_dist(v1, v2):
+        s = 0.0
         for x, y in zip(v1, v2):
-            dot += x*y
-            norm1 += x*x
-            norm2 += y*y
-        denom = math.sqrt(norm1)*math.sqrt(norm2)
-        if denom == 0.0:
-            return 0.0
-        return float(dot/denom)
+            diff = (x - y)
+            s += diff*diff
+        return float(math.sqrt(s))
 
-    # 2) Cross join => compute cos_similarity
+    # Step C: Cross join => compute distance
     df_join = df_scaled.crossJoin(centers_df)
 
     df_join = df_join.withColumn(
-        "cos_similarity",
-        cos_sim(F.col("scaledFeatures"), F.col("features"))
+        distance_col,
+        euclidean_dist(F.col("scaledFeatures"), F.col("features"))
     )
 
-    # 3) For each consumer row, pick the cluster with the highest similarity
-    w = Window.partitionBy("hh_id_in_wh").orderBy(F.col("cos_similarity").desc())
-
+    # Step D: For each row, pick cluster with smallest distance
+    w = Window.partitionBy(id_col).orderBy(F.col(distance_col).asc())
     df_best = df_join.withColumn("rn", F.row_number().over(w)) \
                      .filter(F.col("rn") == 1) \
-                     .drop("rn") \
-                     .withColumnRenamed("cos_similarity", "max_similarity")
+                     .drop("rn")
 
-    # 4) Join with max_dist_df or min_sim_df => filter
-    # Example if we do distance-based with "max_distance":
-    # (You can adapt for similarity-based if you'd like.)
-    df_filtered = df_best.join(max_dist_df, on="cluster_id", how="left") \
-                         .filter(F.col("distance_to_center") <= F.col("max_distance"))
+    # Step E: (Optional) If you have a max_dist_df => filter
+    if max_dist_df is not None:
+        # Suppose max_dist_df has columns [cluster_id, max_distance]
+        df_filtered = df_best.join(max_dist_df, on="cluster_id", how="left") \
+            .filter(F.col(distance_col) <= F.col("max_distance"))
+        return df_filtered
+    else:
+        return df_best
 
-    return df_filtered
 
 
 
