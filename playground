@@ -1,38 +1,93 @@
-# CODE SNIPPET (MODIFIED)
+import pyspark.sql.functions as F
+from pyspark.sql.window import Window
+from pyspark.sql.types import DoubleType
+import math
 
-# 1) Compute each PWM's similarity_to_center rather than distance
-#    We'll define a helper function to do cos similarity,
-#    or reuse your existing cos_sim(...) function if you have it.
+def calculate_similarity_and_filter(
+    spark,
+    df,             # large consumer DataFrame
+    centers_df,     # Spark DF with columns: [cluster_id, features (array<double> in scaled space)]
+    minmax_model,   # The fitted MinMaxScalerModel from your clustering pipeline
+    feature_cols,   # list of feature columns that were scaled
+    max_dist_df     # or min_sim_df, whichever you use for filtering
+):
+    """
+    1) Convert each row's raw features -> scaledFeatures using the MinMax formula:
+       scaled = (x - originalMin[i]) / (originalMax[i] - originalMin[i])
+    2) Cross-join with cluster centers => compute cos_similarity or distance.
+    3) Pick best cluster => filter if needed by max_dist, min_sim, etc.
+    """
 
-def cosine_similarity(v1, v2):
-    # same approach as in your code
-    return float(np.dot(v1, v2) / (np.linalg.norm(v1)*np.linalg.norm(v2)))
+    # 1) Retrieve the arrays from the MinMaxScalerModel
+    #    They are Spark ML Vectors => convert them to Python lists.
+    originalMin = minmax_model.originalMin.toArray()  # e.g. [min1, min2, ...]
+    originalMax = minmax_model.originalMax.toArray()  # e.g. [max1, max2, ...]
 
-distances = []
-similarities = []
-for i, c_id in enumerate(cluster_ids):
-    center_vec = kmeans.cluster_centers_[c_id]  # scikit center
-    row_vec = scaled[i]
-    # distance = np.linalg.norm(row_vec - center_vec)
-    sim = cosine_similarity(row_vec, center_vec)
-    similarities.append(sim)
+    # Build expressions to scale each feature
+    scaled_exprs = []
+    for i, fcol in enumerate(feature_cols):
+        # range = originalMax[i] - originalMin[i]
+        range_i = originalMax[i] - originalMin[i]
+        if range_i == 0.0:
+            # edge case: if max==min for that feature, fall back to 0 or handle it
+            scaled_exprs.append(F.lit(0.0).alias(f"{fcol}_scaled"))
+        else:
+            expr = (F.col(fcol) - F.lit(originalMin[i])) / F.lit(range_i)
+            scaled_exprs.append(expr.alias(f"{fcol}_scaled"))
 
-pdf["similarity_to_center"] = similarities
+    # Keep other columns from df. We'll add scaled columns.
+    all_non_feature_cols = [c for c in df.columns if c not in feature_cols]
 
-# 2) Create a Spark DF with cluster assignments
-df_with_clusters = spark.createDataFrame(pdf)
+    df_scaled = df.select(*all_non_feature_cols, *scaled_exprs)
 
-# 3) Group by cluster_id => the "worst" PWM is the one with the LOWEST similarity
-gpdf = pdf.groupby("cluster_id")["similarity_to_center"].min().reset_index()
-
-min_sim_rows = []
-for row in gpdf.itertuples(index=False):
-    min_sim_rows.append(
-        Row(cluster_id=int(row.cluster_id), min_similarity=float(row.similarity_to_center))
+    # Combine scaled columns into an array for easier similarity calc
+    df_scaled = df_scaled.withColumn(
+        "scaledFeatures",
+        F.array([F.col(f"{fcol}_scaled") for fcol in feature_cols])
     )
-min_sim_df = spark.createDataFrame(min_sim_rows)
 
-return df_with_clusters, centers_df, scaler, features, min_sim_df
+    # define UDF for cos similarity or distance
+    from pyspark.sql.functions import udf
+    from pyspark.sql.types import DoubleType
+
+    @udf(DoubleType())
+    def cos_sim(v1, v2):
+        dot = 0.0
+        norm1 = 0.0
+        norm2 = 0.0
+        for x, y in zip(v1, v2):
+            dot += x*y
+            norm1 += x*x
+            norm2 += y*y
+        denom = math.sqrt(norm1)*math.sqrt(norm2)
+        if denom == 0.0:
+            return 0.0
+        return float(dot/denom)
+
+    # 2) Cross join => compute cos_similarity
+    df_join = df_scaled.crossJoin(centers_df)
+
+    df_join = df_join.withColumn(
+        "cos_similarity",
+        cos_sim(F.col("scaledFeatures"), F.col("features"))
+    )
+
+    # 3) For each consumer row, pick the cluster with the highest similarity
+    w = Window.partitionBy("hh_id_in_wh").orderBy(F.col("cos_similarity").desc())
+
+    df_best = df_join.withColumn("rn", F.row_number().over(w)) \
+                     .filter(F.col("rn") == 1) \
+                     .drop("rn") \
+                     .withColumnRenamed("cos_similarity", "max_similarity")
+
+    # 4) Join with max_dist_df or min_sim_df => filter
+    # Example if we do distance-based with "max_distance":
+    # (You can adapt for similarity-based if you'd like.)
+    df_filtered = df_best.join(max_dist_df, on="cluster_id", how="left") \
+                         .filter(F.col("distance_to_center") <= F.col("max_distance"))
+
+    return df_filtered
+
 
 
 
