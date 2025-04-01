@@ -1,158 +1,111 @@
-Below is a **comprehensive pipeline documentation** that includes:
-
-- **How** we **select features** each month (to avoid feature drift),  
-- **How** we scale and cluster PWM data using **MinMaxScaler** and **K-Means**,  
-- **How** prospects are assigned and filtered by maximum distance, and  
-- **How** we generate **insights** using a **1-vs-all approach** for each cluster (rather than numeric details).
-
-It’s structured so **non-technical stakeholders** can see the big picture while also covering enough detail for data/technical teams to implement.
+Below is a **non-technical** version of the pipeline documentation. Each step focuses on the **why** and **how** in plain language, with minimal code references. The goal is for a broader audience—business stakeholders or non-technical team members—to understand **what** the pipeline is doing and **why** each step is important.
 
 ---
 
-# **Pipeline Documentation**
+# **Automated Private Wealth Prospecting Pipeline**
 
 ## **1. Overview**
 
-Our pipeline automates the process of **selecting top features**, **clustering existing Private Wealth Management (PWM) clients**, **identifying similar prospects**, and providing **explanations** (insights) on why each prospect qualifies.
+This pipeline aims to **find new leads** for Private Wealth Management (PWM). It does so by:
 
-1. **Monthly Feature Selection**:  
-   - Every month (or on a chosen schedule), we re-run a Spark-based random forest classifier on PWM vs. Consumer data to pick the **most predictive** columns out of potentially dozens or hundreds.  
-   - This **prevents feature drift**: if certain columns become less relevant over time, the random forest will drop them; newly emergent behavior will be captured in the newly selected features.
+1. **Regularly picking** the **best features** (columns) each month, so it **adapts** to changes in customer behavior.  
+2. **Grouping** existing PWM clients with a clustering approach that **doesn’t overly exclude** potential leads.  
+3. **Highlighting** specific reasons why a household is similar to PWM clients, so business teams can easily see the **key factors**.
 
-2. **K-Means + MinMaxScaler**:  
-   - We apply **MinMaxScaler** (in scikit-learn) so each selected feature is scaled into a **0–1** range. This avoids one extremely large feature overshadowing everything else.  
-   - We then cluster the scaled PWM data using **K-Means** to form \(k\) distinct groups. Each cluster has a “maximum distance” representing the farthest PWM in that group.
-
-3. **Prospect Assignment**:  
-   - For each new prospect, we **scale** them with the same **MinMax** transformations and measure distance to each cluster center. If the closest distance is below that cluster’s maximum distance, the prospect is included.
-
-4. **Insight Generation (1-vs-All)**:  
-   - For each cluster, we train a small “1-vs-all” classifier to see which features **best differentiate** that cluster from the others.  
-   - That yields a **short list** of top features for each cluster.  
-   - Instead of showing numeric values, we provide a simple sentence enumerating **the key features** that define the cluster, e.g., “This cluster is characterized by large AUM, multiple credit products, and high net worth segment.”  
-   - When a prospect is assigned to that cluster, we say “The household is selected because of [top features].”
-
-This design ensures the pipeline remains **adaptive** (no feature drift), **broad** enough to capture potential PWM leads (via MinMax-scaling and maximum-distance filtering), and **transparent** about cluster-specific reasons for a prospect’s inclusion.
+Ultimately, this ensures the pipeline **keeps up** with changing patterns and **explains** each household’s inclusion.
 
 ---
 
-## **2. Detailed Steps**
+## **2. Monthly Feature Selection**
 
-### **2.1 Feature Selection (Monthly)**
+### **2.1 Why We Select Features Dynamically**
 
-1. **Script**: `run_feature_importance.py`  
-2. **Process**:  
-   1. **Load Data**: We read the main “prospecting_features” table, focusing on rows labeled “PWM” vs. “Consumer.”  
-   2. **Random Forest**: Spark ML’s RandomForestClassifier separates PWM (label=1) from Consumer (label=0).  
-   3. **Extract Importances**: The model returns **feature importances**. We sort them descending, pick the top \(N\).  
-   4. **Store**: We write these top columns to a **data-lake table** (“selected_features”), so the next step automatically picks them up.  
-3. **Benefits**:  
-   - Because we **re-run** each month, the pipeline **adapts** if certain behaviors (e.g., “mobile deposits”) become more predictive, or others (like “paper checks”) become less so.  
-   - This ensures **no drift**—always using the best set of columns.
+- **Data Shifts**: Over time, new products come out, or clients’ usage patterns change. Columns that used to be key might lose relevance, and new columns might become more important.  
+- **Prevent Staleness**: If we **never** refreshed which columns we focus on, we’d risk “feature drift,” where the pipeline relies on outdated factors.  
+- **Automatic Updates**: By **re-checking** the best columns each month, the pipeline always uses the **freshest** indicators of PWM-like behavior.
 
-### **2.2 Clustering with K-Means + MinMaxScaler**
+### **2.2 How We Do It with a Random Forest**
 
-1. **Data**:  
-   - We take the newly selected features for **all PWM** clients, load them into a local array (NumPy or Pandas).  
-2. **MinMaxScaler** (scikit-learn):  
-   - Each column is transformed so values lie between [0, 1]:  
-     \[
-       x_{\text{scaled}} = \frac{x - \text{min}}{\text{max} - \text{min}}
-     \]
-   - This prevents huge balances or transaction counts from **dominating** distance calculations.  
-3. **K-Means**:  
-   - We fit `kmeans = KMeans(n_clusters=k, random_state=42)` on the scaled PWM data.  
-   - Each row is assigned a **cluster_id**.  
-   - For cluster \(c\), we measure the **maximum** Euclidean distance from any PWM row to the cluster center. That is the cluster’s “radius” or “max distance.”  
-4. **Storage**:  
-   - We store the final **cluster centers** (in scaled space) and each cluster’s **max distance**.  
-   - That can be done in a small table or simply in memory for the next script.
-
-### **2.3 Prospect Assignment + Distance Filter**
-
-1. **Data**:  
-   - For the same month, or the next day, we gather prospective leads (consumers) from the “prospecting_features” table, but only for those top \(N\) columns.  
-2. **Scaling**:  
-   - We **apply** the same MinMax formula from scikit-learn by using `data_min_` and `data_range_`.  
-3. **Assign**:  
-   - For each prospect, we measure its distance to each cluster center in scaled space, pick the **lowest**.  
-   - If `lowest_distance <= max_distance_of_that_cluster`, the prospect is included. Otherwise, it’s filtered out.  
-4. **Result**:  
-   - A smaller set of “**prospect**” rows, each with a cluster assignment. Some might get excluded if they’re too far from every cluster.
-
-### **2.4 Insight Generation (1-vs-All Method)**
-
-1. **Goal**: Show each cluster’s **defining features** in a simple way.  
-2. **How**: **Cluster-Specific “1 vs. Rest”**  
-   1. For each cluster \(c\), label PWM in \(c\) as 1, and PWM in all other clusters as 0.  
-   2. Train a small classifier (RandomForest, logistic regression, etc.) to see which columns best separate cluster \(c\) from the rest.  
-   3. The top features from this classifier define cluster \(c\)’s “core identity.”  
-3. **Why**:  
-   - If cluster \(c\) is mostly “affluent with multiple deposit products,” the top features might be “money market usage,” “bal_amt_sum,” “b__affluent.” Another cluster might revolve around “credit card usage,” “high net worth.”  
-   - This ensures each cluster’s explanation is **unique** rather than a single global list.  
-4. **User-Friendly**:  
-   - We skip numeric ranges or raw values. Instead, we produce a final statement like:  
-     > “This household is selected because of **AUM dollars**, **the sum of balances in all accounts**, and **the balance change over the previous month**.”  
-   - Thus, the business team sees **which** features make that cluster special, without needing to parse numeric details.
+- **Basic Idea**: A “random forest” model looks at which columns best separate **existing PWM** clients from ordinary **consumers**.  
+- **Ranking Columns**: After training, it gives each column an **importance score**—like how strongly “balance growth” or “credit usage” helps identify PWM.  
+- **Top Columns**: We **sort** columns by importance and pick the top (say 20). These become the focus for clustering and analysis that month.  
+- **Outcome**: If “online transfers” suddenly becomes a big differentiator, it rises in the ranking, and older, less useful columns drop off.
 
 ---
 
-## **3. Configuration & References**
+## **3. Grouping Existing PWM Clients (Clustering)**
 
-- **`config.yaml`** (Example):  
-  1. **model_parameters**:  
-     - `k`: number of K-Means clusters.  
-     - `top_features_count`: how many to store from random forest.  
-     - `n_prospects`: any final usage filter.  
-  2. **tables**:  
-     - `prospecting_features`: The big table for all features (PWM + Consumer).  
-     - `selected_features`: Where we store the top columns each month.  
-     - `prospect_insights`: Where we store the final result with textual explanations.  
-  3. **feature_human_labels**: Optionally mapping raw names (like `bal_amt_sum`) to a phrase (`“the total balance”`).  
-- **Scripts**:  
-  1. **`run_feature_importance.py`**: Spark-based random forest → picks top features, writes them to `selected_features`.  
-  2. **(Local scikit-learn code or notebook)**: Takes PWM data for those top columns, fits MinMaxScaler + K-Means, identifies each cluster’s max distance.  
-  3. **`run_prospect.py`**: Applies the same scaling to consumer leads, assigns clusters, discards those beyond the cluster’s radius.  
-  4. **`run_insight.py`** (Post-Processing):  
-     - For each cluster, do the “1 vs. rest” step on PWM, pick top features.  
-     - Produce a final text statement listing those features in plain English.  
-     - Store in `prospect_insights`.
+### **3.1 Why We Need Clusters**
+
+- **Varied Patterns**: Not all PWM clients look the same. Some might have huge balances, others might have multiple investment products, etc.  
+- **Making Groups**: By clustering them, we find **natural subgroups** so we can measure a potential lead’s closeness to each subgroup.
+
+### **3.2 How We Scale and Cluster**
+
+- **Scaling**: We use something called **MinMax scaling**, which shrinks each chosen column into a range **from 0 to 1**. This **prevents** one extreme column (like an enormous balance) from overshadowing others.  
+- **K-Means**: Next, we apply **K-Means** to these scaled columns, splitting PWM clients into, say, 5 or 10 subgroups. Each subgroup has a **center** in this scaled space.  
+- **Max Distance**: For each group, we measure the **farthest** PWM client from that center. That distance is our “cluster radius.” If you’re within that radius, you’re considered close enough to that group.
 
 ---
 
-## **4. Non-Technical Notes**
+## **4. Finding New Prospects**
 
-- **Why Re-Select Features Each Month?**  
-  - Customer behavior can change: new online deposit patterns, or interest rates shift product usage. By re-selecting, we capture these trends automatically.  
-  - This avoids “feature drift,” where old columns stay even though they no longer correlate with PWM membership.
+### **4.1 Assigning a Prospect to a Cluster**
 
-- **Why MinMaxScaler?**  
-  - Some columns (like `bal_amt_sum`) can be extremely large for high net worth individuals. This might overshadow smaller-scale columns (like “number of credit cards” or “arrangement_count”).  
-  - By mapping **every** column into [0,1], we let the K-Means algorithm consider them more equally.
+- **Same Scaling**: A new household’s data is shrunk to the same 0–1 range used for clustering.  
+- **Compare Distance**: We calculate how far they are from each group’s center. The **closest** center is that prospect’s best match.  
+- **Include or Exclude**: If that distance is **less than** the group’s radius, we **include** the prospect; otherwise, they’re too far.
 
-- **Why Filter by “Max Distance?”**  
-  - If a prospect’s distance is bigger than the farthest PWM in that cluster, it suggests they’re truly outside that group’s typical range.  
-  - This ensures we only pick prospects who are “at least as close as the farthest real PWM member.”
+### **4.2 Why Distance Filtering Works**
 
-- **Why “1-vs-All?”**  
-  - Each cluster is unique, so we compare cluster \(c\) vs. the rest of PWM to find the features that truly define \(c\).  
-  - That yields a short list of **differentiating** features for each cluster, making it easy to see why a prospect ended up in that group.
+- **True Similarity**: If you’re **closer** than the farthest actual PWM client, you likely share the relevant traits (high balances, certain product usage, etc.).  
+- **Broad Enough**: The radius ensures we don’t set an **artificially small** cutoff—if real PWM are that far, it’s valid to include prospects that far as well.
 
 ---
 
-## **5. Summary & Next Steps**
+## **5. Explaining Each Cluster via “1 vs. All”**
 
-With this pipeline:
+### **5.1 Why Explain Clusters Separately**
 
-1. **We Adapt**: The random forest picks top features each month, so we always target what matters.  
-2. **We Cluster**: Using MinMaxScaler + K-Means, each cluster has a broad but meaningful range.  
-3. **We Filter**: Distance-based exclusion ensures only the truly similar prospects remain.  
-4. **We Explain**: A “1 vs. rest” approach yields short, **human-readable** insights, describing the cluster’s core features.
+- **Different Subgroups**: Each cluster can be **quite unique**—some revolve around large deposit usage, others around big credit products. A single explanation for all PWM wouldn’t capture these nuances.
 
-**Next Steps** could include:
+### **5.2 How “1 vs. All” Works**
 
-- **Tuning `k`**: If too few or too many clusters hamper interpretability.  
-- **Enriching** the “1 vs. rest” analysis to produce more detailed rationales or a ranking of features for each prospect.  
-- **Experimenting** with alternative scalers (RobustScaler) or similarity metrics (cosine similarity) if outliers remain a concern.
+- **One Cluster Is “Positive”**: Take cluster A and label its PWM as **1** (the positives).  
+- **All Other Clusters Are “Negative”**: PWM in clusters B, C, etc. are **0**.  
+- **Train a Small Model**: This small model sees which **chosen columns** (from the monthly selection) best distinguish cluster A from every other cluster.  
+- **Top Features per Cluster**: We end up with, say, 5 key columns that define cluster A’s identity. Then we do the same for cluster B, and so on.
 
-Overall, this design **balances** adaptability, coverage of potential PWM leads, and transparent cluster-based explanations—serving both data teams and business stakeholders.
+### **5.3 Why This Matters**
+
+- **Cluster Identity**: We can quickly say, “Cluster A is typically about big money market usage + multiple credit products,” while cluster B might revolve around “high net worth segment + advanced investment accounts.”  
+- **Better Explanation**: When a new household falls into cluster A, we know it matched **that** cluster’s main features—so we can easily highlight them in an insight statement or note.  
+
+---
+
+## **6. Non-Technical Summary of the Whole Flow**
+
+1. **Pick the Best Columns** each month with a **random forest** (this avoids stale or less predictive data).  
+2. **Group** existing PWM by **K-Means** on those columns. Each group has a **radius** based on the farthest PWM in that group.  
+3. **Assign** new households by measuring distance to each group. If they’re within a group’s radius, we say **they’re included**.  
+4. **Define** each group’s main traits using a **1 vs. all** approach (one cluster vs. the rest of PWM).  
+5. **Result**: We get a new set of prospects monthly who match current PWM behaviors, plus a short explanation of why each cluster is special.
+
+---
+
+## **7. Why This Approach is Effective**
+
+- **Adapts Monthly**: The feature selection step ensures we never rely on outdated patterns.  
+- **Broad, Balanced Groups**: MinMax scaling avoids overshadowing smaller columns, letting us fairly measure all relevant traits.  
+- **Distance Filtering**: Only prospects who truly resemble at least one PWM group get included, limiting false positives.  
+- **Clear “1 vs. All”**: Each cluster’s defining features are easy to see and communicate, bridging the gap between data science and business.
+
+---
+
+## **8. Further Notes**
+
+- **Adjusting the Number of Clusters**: Fewer clusters → bigger groups, more inclusive radius. More clusters → narrower, more specific subgroups.  
+- **Changing the Distance**: If you want more leads, you could allow a bit more distance than the farthest PWM client—like a 10% buffer.  
+- **Going Deeper on Insights**: If you want numeric or range details, you can still store them. But many teams prefer a simpler approach that just states the top reasons.  
+
+With these steps, your organization can **consistently** identify potential PWM leads, **explain** how they match existing clients, and **stay relevant** as new data emerges.
