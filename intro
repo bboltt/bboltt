@@ -1,5 +1,47 @@
-The goal is to identify which consumers most closely resemble existing Private Wealth Management (PWM) clients. We do this by clustering current PWM clients and computing a maximum distance (or “radius”) for each cluster—the distance between the cluster’s center and its farthest PWM member. Any consumer whose distance to that cluster’s center is less than or equal to the cluster’s radius is considered sufficiently similar to qualify as a PWM prospect. In other words, if a consumer falls within at least one cluster’s maximum distance, they are flagged as having a high potential to convert to PWM.
----
+2.3.2 Distance-Based Prospect Selection (New)
+In the current approach, prospect selection relies on distance rather than similarity. Specifically, each cluster produced by the K-Means algorithm has a maximum distance (or “radius”), which is the farthest distance a PWM client in that cluster is from the cluster’s centroid. Any prospect whose distance to that cluster centroid is less than or equal to this maximum distance is considered close enough to be a potential PWM lead.
+
+Why Distance?
+
+We measure the Euclidean distance from a prospect’s scaled feature vector to each cluster centroid.
+
+If the prospect’s distance is within at least one cluster’s maximum distance, we include that prospect in our final list.
+
+Outcome
+
+This ensures that if a prospect’s position in the scaled feature space is similar to the most distant existing PWM client in that cluster, they qualify. Prospects lying outside all cluster radii are excluded.
+
+2.3.3 Calculating Similarity Score (Additional Reference)
+Although the pipeline no longer uses cosine similarity to decide which prospects to include, we still compute a similarity score as an additional reference. This similarity score indicates how closely a prospect’s feature vector aligns with each cluster’s centroid.
+
+Use Case: Business teams can still look at the similarity score to see which cluster a prospect fits best, or compare multiple prospects on a single scale.
+
+Cross-Join and Formula: We cross-join prospective clients (filtered to exclude existing PWM clients) with the pre-computed cluster centroids and calculate the score via:
+
+Cosine Similarity
+=
+𝐴
+⋅
+𝐵
+∥
+𝐴
+∥
+ 
+∥
+𝐵
+∥
+Cosine Similarity= 
+∥A∥ ∥B∥
+A⋅B
+​
+ 
+where 
+𝐴
+A is the feature vector of a prospect, and 
+𝐵
+B is the centroid of a cluster. The higher the similarity score, the more closely the prospect matches that cluster’s overall profile.
+
+While distance ultimately determines inclusion in the final PWM prospect list, similarity remains a helpful indicator of how strongly a prospect aligns with the typical traits of that cluster.
 
 # **Automated Private Wealth Prospecting Pipeline**
 
