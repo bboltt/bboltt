@@ -1,5 +1,12 @@
-Below is a **revised “Performance Evaluation”** section that references the high-level steps from your evaluation code. It assumes a **non-technical** audience who wants to understand *why* and *how* you measure the model’s accuracy by capturing real PWM conversions:
+Below are the rates for recent monthly runs:
 
+2024-03-31: ~85.7% capture rate
+
+2024-04-30: ~83.3% capture rate
+
+2024-06-30: ~76.0% capture rate
+
+2024-05-31: ~71.1% capture rate
 ---
 
 ### **2.3.6 Performance Evaluation (Refined)**
