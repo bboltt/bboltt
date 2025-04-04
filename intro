@@ -1,5 +1,4 @@
-Below is a **non-technical** version of the pipeline documentation. Each step focuses on the **why** and **how** in plain language, with minimal code references. The goal is for a broader audience—business stakeholders or non-technical team members—to understand **what** the pipeline is doing and **why** each step is important.
-
+The goal is to identify which consumers most closely resemble existing Private Wealth Management (PWM) clients. We do this by clustering current PWM clients and computing a maximum distance (or “radius”) for each cluster—the distance between the cluster’s center and its farthest PWM member. Any consumer whose distance to that cluster’s center is less than or equal to the cluster’s radius is considered sufficiently similar to qualify as a PWM prospect. In other words, if a consumer falls within at least one cluster’s maximum distance, they are flagged as having a high potential to convert to PWM.
 ---
 
 # **Automated Private Wealth Prospecting Pipeline**
