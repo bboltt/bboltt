@@ -1,49 +1,45 @@
-2.3.2 Distance-Based Prospect Selection (New)
-In the current approach, prospect selection relies on distance rather than similarity. Specifically, each cluster produced by the K-Means algorithm has a maximum distance (or “radius”), which is the farthest distance a PWM client in that cluster is from the cluster’s centroid. Any prospect whose distance to that cluster centroid is less than or equal to this maximum distance is considered close enough to be a potential PWM lead.
+Below is a **revised “Performance Evaluation”** section that references the high-level steps from your evaluation code. It assumes a **non-technical** audience who wants to understand *why* and *how* you measure the model’s accuracy by capturing real PWM conversions:
 
-Why Distance?
+---
 
-We measure the Euclidean distance from a prospect’s scaled feature vector to each cluster centroid.
+### **2.3.6 Performance Evaluation (Refined)**
 
-If the prospect’s distance is within at least one cluster’s maximum distance, we include that prospect in our final list.
+**Purpose**  
+We measure how many **actual PWM conversions** (i.e., consumers who truly ended up with PWM status) were **successfully flagged** as prospects by this pipeline. We define **conversion capture rate** as:
 
-Outcome
+\[
+  \text{Conversion Capture Rate} 
+  = \frac{\text{Number of valid PWM conversions that were also selected as prospects}}{\text{Total number of valid PWM conversions}}
+\]
 
-This ensures that if a prospect’s position in the scaled feature space is similar to the most distant existing PWM client in that cluster, they qualify. Prospects lying outside all cluster radii are excluded.
+---
 
-2.3.3 Calculating Similarity Score (Additional Reference)
-Although the pipeline no longer uses cosine similarity to decide which prospects to include, we still compute a similarity score as an additional reference. This similarity score indicates how closely a prospect’s feature vector aligns with each cluster’s centroid.
+**1) Identifying Potential Conversions**  
+- We first pinpoint a group of **target consumers**—for example, those meeting certain conditions (e.g., having assets above a threshold) who currently do **not** have a PWM relationship.  
+- Over the next **6 months**, we track which of these target consumers actually establish a **new** PWM relationship. Those are **valid conversions** (the “ground truth”).
 
-Use Case: Business teams can still look at the similarity score to see which cluster a prospect fits best, or compare multiple prospects on a single scale.
+**2) Checking the Pipeline’s Predictions**  
+- Separately, on the **score date** (e.g., end of March), the pipeline selects a subset of consumers as **prospects** using our distance-based approach.  
+- We then see how many of the **actual converters** (from step 1) were also **predicted** as prospects. The overlap is the **captured conversions**.
 
-Cross-Join and Formula: We cross-join prospective clients (filtered to exclude existing PWM clients) with the pre-computed cluster centroids and calculate the score via:
+**3) Capture Rate**  
+- The ratio of “captured conversions” to “all actual conversions” is our main success measure. For example, if 100 consumers truly became PWM within 6 months, and 85 of them were in our prospect list, our capture rate is 85%.  
+- A **higher** capture rate means we found more real converters in our leads; a **lower** rate means we missed too many actual PWM joiners.
 
-Cosine Similarity
-=
-𝐴
-⋅
-𝐵
-∥
-𝐴
-∥
- 
-∥
-𝐵
-∥
-Cosine Similarity= 
-∥A∥ ∥B∥
-A⋅B
-​
- 
-where 
-𝐴
-A is the feature vector of a prospect, and 
-𝐵
-B is the centroid of a cluster. The higher the similarity score, the more closely the prospect matches that cluster’s overall profile.
+---
 
-While distance ultimately determines inclusion in the final PWM prospect list, similarity remains a helpful indicator of how strongly a prospect aligns with the typical traits of that cluster.
+**Interpretation**  
+- **Why We Want a High Capture Rate**: If the model’s chosen leads cover **most** of the consumers who *actually* became PWM, it indicates we’re effectively identifying households with genuine PWM potential.  
+- **Assumption**: We treat all unselected consumers as having *similar potential* to those who converted. If a significant portion of actual converters were never flagged, it suggests we might be missing out on real opportunities.
 
-# **Automated Private Wealth Prospecting Pipeline**
+---
+
+**Example**  
+- Suppose in March we identified 500 target consumers (no PWM status yet). Six months later, 70 of them **did** open PWM relationships. Our pipeline had predicted 60 of those 70 as prospects.  
+  - **Capture Rate**: \(60/70 = 85.7\%\).  
+  - This implies our pipeline “caught” 85.7% of the actual new PWM clients—an encouraging sign that our distance-based approach effectively spots households with near-future PWM potential.
+
+By **periodically reviewing** the capture rate (and adjusting thresholds or cluster parameters if needed), we can ensure our pipeline consistently targets the **majority** of real PWM conversions.
 
 ## **1. Overview**
 
