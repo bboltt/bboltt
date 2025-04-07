@@ -1,0 +1,23 @@
+“I recently worked on an Inclearing Fraud Detection project at a financial institution, where we aimed to identify and flag fraudulent checks in the inclearing process. We drew data from multiple sources, including:
+
+A base inclearing transactions table (amount, date/time, account details)
+
+Mitek check‐image analysis (to detect physical alterations)
+
+Device login logs (highlighting unusual access patterns)
+
+Call center interactions (capturing high‐risk call reasons or escalations)
+
+Because fraud was extremely rare—often under one percent of checks—we first tackled class imbalance by upsampling fraudulent rows, giving the model more examples of minority‐class patterns. However, we encountered a specific challenge with large‐value checks: the dataset had very few fraud cases at high amounts, so the model tended to learn that checks above a certain threshold were “safe.”
+
+To address this, we introduced a targeted bucketing strategy on the check amount feature. Rather than letting the model split purely on continuous values—where it might place a single cutoff around $2,000 or $5,000—we transformed “amount” into a few carefully chosen bins:
+
+$0–$1,000: Fine‐grained intervals of $50 each, because low‐value fraud is more common.
+
+$1,000–$2,000: $100 increments for moderate‐value checks.
+
+> $2,000: A single large bucket forcing the model to rely on other signals (e.g., account or Mitek flags) for these high amounts.
+
+This approach helped avoid a simplistic threshold split in the large‐value range, which had few fraud examples. By placing all big checks in one category, the Gradient Boosted Trees model had to look at other features to identify high‐amount fraud, rather than incorrectly classifying every large deposit as legitimate.
+
+We built our GBT classifier in PySpark, monitoring performance via AUC metrics, Gains charts, and the rate of fraud capture. After tuning hyperparameters (like tree depth and learning rate) and implementing the bucketing approach for big checks, the model significantly improved its ability to detect both small‐value and high‐value fraudulent checks—far exceeding the performance of the previous rules‐based system. Overall, it was a great learning experience in imbalanced data handling, feature engineering, and the art of guiding tree‐based models to capture rare, high‐impact events.”
