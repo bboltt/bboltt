@@ -1,13 +1,73 @@
-### Bucketing of the Amount Feature
+Slide 1 – Why & What
+Project goal
 
-To enhance the fraud detection capability of the Gradient Boosted Tree (GBTClassifier) model—particularly addressing its tendency to misclassify high-value checks as non-fraudulent—we applied a targeted bucketing strategy on the transaction amount feature.
+Identify consumer households that are most likely to convert to Private Wealth Management (PWM) within the next 6 months
 
-The bucketing approach transformed the continuous `amount` feature into discrete intervals. Specifically, we implemented **multi-granularity bins** to handle the varying distribution of fraud across different check amounts:
+Provide an interpretable “why‑selected” reason for every prospect
 
-- For transaction amounts between \$0 and \$1,000, we created relatively fine-grained bins, each spanning \$50 increments (e.g., \$0–50, \$50–100, \$100–150, …, \$950–1,000). These narrower bins enable the model to effectively differentiate fraud patterns within the lower-value range, where fraud occurrences are more frequent.
+Core technology choices
 
-- For amounts between \$1,000 and \$2,000, the granularity was broadened to \$100 increments (e.g., \$1,000–1,100, \$1,100–1,200, …, \$1,900–2,000). This broader interval balances the sensitivity to fraud occurrences with the need to avoid overly-specific numeric splits for intermediate amounts.
+Monthly feature refresh — Random‑Forest importance → top N columns
 
-- Finally, all transaction amounts above \$2,000 were grouped into a single broad bucket (> \$2,000). This intentional aggregation prevents the model from relying on simplistic numeric thresholds at high transaction values, compelling it to use other, potentially more informative features to detect fraud among large checks, where fraudulent examples are typically sparse.
+Min‑Max scaling & K‑Means on current PWM clients → multiple “PWM archetype” clusters
 
-This structured, multi-level bucketing methodology preserves existing strong fraud-detection performance at lower amounts, while effectively addressing the model’s previous shortcoming in recognizing high-value fraudulent checks.
+Distance radius per cluster = farthest PWM in that group (no hard similarity threshold)
+
+Prospect assignment — consumer inside ≥1 cluster radius ⇒ becomes a lead
+
+Cluster explanation — “1‑vs‑all” model on each cluster surfaces its 5‑8 hallmark features
+
+Performance check — capture‑rate = % of real 6‑month PWM conversions caught by the leads list (80 %+ in recent runs)
+
+Key benefits
+
+Automatic drift resistance: feature list updates every run
+
+Distance filter prevents over‑tight clustering → larger, yet still relevant, lead pool
+
+Cluster‑specific top‑features give instant business context (not raw numbers)
+
+Slide 2 – End‑to‑End Workflow
+Data ingest
+
+50 + candidate features per household (balances, products, transactions, demographics)
+
+Feature selection (monthly)
+
+Spark RF ⇒ rank columns ⇒ store top N in selected_features table
+
+PWM clustering (Python / scikit‑learn)
+
+Min‑Max scaler → K‑Means (k≈10) on PWM rows
+
+Record cluster centers & max Euclidean radius
+
+Prospect scoring (Spark)
+
+Scale consumer rows with same min/max
+
+Measure distance to every centroid
+
+Keep row if distance ≤ cluster radius
+
+Output: prospects_all (hh_id, cluster_id, distance)
+
+Cluster insight extraction
+
+For each cluster: 1‑vs‑all RF ⇒ top hallmark features
+
+Map raw names → business‑friendly terms
+
+Insight text: “Selected because of AUM dollars, multiple investment products, …”
+
+Evaluation loop
+
+Six‑month look‑ahead → real PWM conversions
+
+Compute capture‑rate; monitor monthly (target ≥ 80 %)
+
+Artifacts delivered
+
+Prospects table + insight column
+
+Monthly dashboard of capture‑rate & feature drift indicators
