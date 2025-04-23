@@ -1,3 +1,16 @@
+%%{ init: { "themeVariables": { "fontSize": "10pm 8px" } } }%%
+flowchart
+    B["Cluster existing PWM<br/>into 30 groups"]
+    B --> F
+    
+    D["All consumer population"]
+    D --> F{"Similar?"}
+    F -- Yes --> G["Flag as PWM prospect"]
+    F -- No  --> H["Not a prospect"]
+
+
+
+
 %%{ init: { 
       "themeVariables": { "fontSize": "30px" },
       "flowchart":      { "nodeSpacing": 60, "rankSpacing": 90 }
