@@ -1,18 +1,23 @@
-flowchart TD
-    A["Monthly data feed<br/>(customer features)"] --> B["Random‑Forest<br/>selects top features"]
-    B --> C["Group existing PWM<br/>with K‑Means clusters"]
+%%{ init: { 
+      "themeVariables": { "fontSize": "30px" },
+      "flowchart":      { "nodeSpacing": 60, "rankSpacing": 90 }
+} }%%
+flowchart LR
+    A["Monthly data feed<br/>(customer features)"] --> B["Random-Forest<br/>selects top 30 features"]
+    B --> C["Group existing PWM<br/>with K-Means clusters"]
     C --> D["Define cluster radius<br/>(farthest PWM)"]
-    B --> E["Consumer universe<br/>(non‑PWM)"]
+    B --> E["Consumer universe<br/>(non-PWM)"]
     E --> F["Measure distance to<br/>each cluster center"]
     F --> G{"Inside any<br/>cluster radius?"}
     G -- "No" --> H["Discard"]
     G -- "Yes" --> I["Prospect list"]
-    C --> J["1‑vs‑all model<br/>per cluster"]
-    J --> K["Key features that<br/>define each cluster"]
-    K --> L["Plain‑language<br/>insight"]
+    C --> J["1-vs-all model<br/>per cluster"]
+    J --> K["Key features (top 5) that<br/>define each cluster"]
+    K --> L["Plain-language<br/>insight"]
     I --> L
-    I --> M["6‑month look‑ahead:<br/>actual PWM conversions"]
-    M --> N["Evaluattion:<br/>Capture‑rate"]
+    I --> M["6-month look-ahead:<br/>actual PWM conversions"]
+    M --> N["Capture-rate"]
+
 
 
 
