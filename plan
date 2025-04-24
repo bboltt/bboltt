@@ -7,6 +7,25 @@ We draw on 50+ customer features—from balances and product mix to transaction 
 For evaluation, we define a valid conversion as any consumer who has no PWM relationship at the score date but does open a PWM relationship within six months. Our capture-rate is simply the share of those true conversions that were already flagged as prospects. In recent runs, we’ve consistently captured 80 percent or more of the real converts—showing our clustering approach effectively zeros in on households with genuine PWM potential.
 
 
+“Here’s our end-to-end approach in five clear steps:
+
+1. Monthly Feature Refresh
+Each run we take our full set of 50+ customer metrics and train a Random Forest to rank them. We then keep the top 30 most predictive features—so we always focus on the signals that truly separate PWM clients from the rest.
+
+2. Cluster PWM Archetypes
+Using those 30 features, we group today’s PWM households into a small number of archetypes. Each archetype captures a distinct client pattern—whether it’s high balances, diverse products, or transaction frequency.
+
+3. Define Archetype Reach
+For each archetype we measure how far its members spread by finding the maximum distance any PWM client sits from that group’s center. That maximum distance becomes the archetype’s reach or radius.
+
+4. Score & Select Consumers
+We apply the same 30 features to every consumer, measure their distance to each PWM archetype center, and flag any consumer who falls within at least one archetype’s reach as a PWM prospect.
+
+5. Surface Cluster Insights
+Finally, for each archetype’s prospect pool we run a quick 1-vs-all analysis to pull out the handful of features that most define that cluster. Those become our plain-English “why you made the list” reasons for each prospect.
+
+
+
 
 %%{ init: { "themeVariables": { "fontSize": "10pm 8px" } } }%%
 flowchart
