@@ -1,13 +1,10 @@
-“Hi everyone. Today I’ll introduce our Private Wealth prospecting engine, which aims to identify consumer households most likely to become PWM clients within six months. To do that, we leverage the core insight that households who look like our existing PWM clients tend to convert.
+Hi everyone. Today I’ll introduce our Private Wealth prospecting engine, which aims to identify consumer households most likely to become PWM clients within six months. To do that, we leverage the core insight that households who look like our existing PWM clients tend to convert.
 
 Importantly, we did not build a traditional classification model—there simply aren’t enough positives (hundreds of conversions against 5 million+ consumers) to train reliably. Instead, we chose an unsupervised clustering approach: we group today’s PWM clients into archetypes, then flag any consumer whose profile falls into one of those archetype patterns as a prospect.
 
 We draw on 50+ customer features—from balances and product mix to transaction counts and tenure—refreshing our top-feature list each month so we stay adaptive and avoid stale signals.
 
-For evaluation, we define a valid conversion as any consumer who has no PWM relationship at the score date but does open a PWM relationship within six months. Our capture-rate is simply the share of those true conversions that were already flagged as prospects. In recent runs, we’ve consistently captured 80 percent or more of the real converts—showing our clustering approach effectively zeros in on households with genuine PWM potential.”
-
-
-
+For evaluation, we define a valid conversion as any consumer who has no PWM relationship at the score date but does open a PWM relationship within six months. Our capture-rate is simply the share of those true conversions that were already flagged as prospects. In recent runs, we’ve consistently captured 80 percent or more of the real converts—showing our clustering approach effectively zeros in on households with genuine PWM potential.
 
 
 
