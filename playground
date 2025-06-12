@@ -1,46 +1,24 @@
-def transformations(spark, df_sets, data_cfg, feature_cfg, model_cfg, verbose):
-    print = redefine_print()
-    dummy_pipeline_file = model_cfg['model_objects']['pmml_pipeline'].replace("{REPLACE}", "DUMMY")
-    dummy_model = DecisionTreeClassifier(max_depth=5, min_samples_split=10)
+def pmml_evaluate(pmml_file, X, pmml_test_size=10000):
+    evaluator = make_evaluator(backend="py4j", path=pmml_file, reporting=True, locatable=True)
+    try:
+        return evaluator.evaluateAll(X)  # full run
+    except Exception as full_err:
+        print(f"[WARN] full PMML evaluate failed: {full_err}")
+        # break into chunks of pmml_test_size
+        outputs = {}
+        for key, df in X.items():
+            n = len(df)
+            print(f"[DEBUG] falling back to chunked evaluate for {key} ({n} rows)")
+            rows = []
+            for start in range(0, n, pmml_test_size):
+                batch = df.iloc[start : start + pmml_test_size]
+                print(f"   batch {start}-{start+len(batch)}", end="…")
+                part = evaluator.evaluateAll(batch)
+                rows.append(part)
+            # concatenate the list of DataFrames back into one
+            outputs[key] = pd.concat(rows, ignore_index=True)
+        return outputs
 
-    # ——— QUICK SANITY CHECK BEFORE FITTING THE PIPELINE ———
-    import numpy as np
-
-    # pull out just the raw feature matrix as a pandas DF
-    pdf = (
-        df_sets['train_set']
-        .select(*feature_cfg.feature_list)
-        .toPandas()
-    )
-    # replace infinities with NaN so we catch both
-    pdf = pdf.replace([np.inf, -np.inf], np.nan)
-
-    # 1) which columns have NaN or Inf?
-    bad = pdf.isna().any()
-    bad_cols = bad[bad].index.tolist()
-    if bad_cols:
-        print(f"[DEBUG] Columns containing NaN/Inf before PMML fit: {bad_cols}")
-
-    # 2) which columns exceed float32 range?
-    max_vals = pdf.abs().max()
-    overflow = max_vals[max_vals > np.finfo('float32').max]
-    if not overflow.empty:
-        print(f"[DEBUG] Columns exceeding float32 max: {overflow.index.tolist()}")
-
-    # now proceed with the normal dummy‐pipeline fit
-    dummy_pipeline = create_pmml_pipeline(
-        model       = dummy_model,
-        X_train     = df_sets['train_set'][feature_cfg.feature_list],
-        y_train     = df_sets['train_set'][data_cfg['source']['label_column']],
-        pipe_file   = dummy_pipeline_file,
-        feature_cfg = feature_cfg,
-        verbose     = verbose,
-        pmml_test_size = 10000,
-        X_test      = df_sets['test_set'][feature_cfg.feature_list],
-    )
-    # ————————————————————————————————————————————————
-
-    # … the rest of your transformations() …
 
 
 
