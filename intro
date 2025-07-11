@@ -1,3 +1,28 @@
+## Workflow and Execution
+
+The Intro to Wealth prospecting framework is comprised of a sequence of interlinked Python scripts, each persisting intermediate results to designated SQL tables (denoted by placeholder schema.object identifiers). These modules must be executed sequentially to uphold data lineage integrity and ensure reproducibility.
+
+1. **customer\_data\_sql\_transfer.py**: Orchestrates the incremental extraction of segmentation and demographic attributes from the enterprise SQL Server. Extracted datasets are ingested into `<staging_schema>.<customer_data_table>`, accompanied by audit logs capturing extraction volume, latency statistics, and schema drift anomalies.
+
+2. **run\_features.py**: Transmutes raw staging artifacts into a structured feature repository by computing temporal aggregations, implementing one-hot or embedding-based encodings for categorical variables, and deriving interaction metrics. The resultant feature matrix is committed to `<feature_schema>.<features_table>`, with pre- and post-transformation summary statistics logged for diagnostic evaluation.
+
+3. **run\_feature\_selection.py**: Employs a hybrid feature-ranking methodology—incorporating both model-based importance (e.g., gradient-boosted tree SHAP values) and statistical criteria (e.g., mutual information)—to distill the most predictive covariates. Selected features are catalogued in `<selection_schema>.<selected_features_table>`, facilitating auditability and prospective reanalysis.
+
+4. **run\_prospect.py**: Invokes the validated classification model to generate probability scores for prospect conversion. Outputs, including predicted scores and rank-ordered lead enumerations, are deposited into `<prospect_schema>.<prospects_table>`, enabling downstream segmentation and outreach orchestration.
+
+5. **run\_insight.py**: Integrates prospect scores with ancillary business intelligence enrichments—such as client segment taxonomy, propensity cohorts, and prioritized engagement tactics—into a consolidated insights table at `<insight_schema>.<insights_table>`. This artifact constitutes the definitive dataset for advisor consumption.
+
+6. **run\_evaluate.py** *(optional)*: Conducts temporal validation by juxtaposing predicted conversions against realized client uptake over a retrospective six-month window. Performance metrics (e.g., ROC-AUC, precision-recall curves) and confusion matrices are recorded in `<evaluation_schema>.<evaluation_table>`, contingent upon the availability of requisite ground-truth data.
+
+**Pre-execution Checklist**: Confirm the presence of all Python dependencies (as specified in `requirements.txt`), validate environment variables for secure credential management, and ensure network egress permissions to both the data lake and SQL Server endpoints.
+
+The structured orchestration of these scripts guarantees a transparent, reproducible, and scalable prospecting pipeline suitable for rigorous academic scrutiny and enterprise deployment.
+
+
+
+
+
+
 Below are the rates for recent monthly runs:
 
 2024-03-31: ~85.7% capture rate
