@@ -16,6 +16,9 @@ The Intro to Wealth prospecting framework is comprised of a sequence of interlin
 
 The structured orchestration of these scripts guarantees a transparent, reproducible, and scalable prospecting pipeline suitable for rigorous academic scrutiny and enterprise deployment.
 
+#### Config Parameter: `evaluate_date`
+
+The `evaluate_date` field in **config.yaml** specifies the business‐date partition against which the retrospective evaluation routine (`run_evaluate.py`) is executed. Because our evaluation logic (`evaluate_leads`) computes conversion and capture rates over a six-month outcome window, it cannot resolve performance metrics for the immediately following month. In practice, you must set `evaluate_date` to a calendar date at least six months prior to “today”; attempting to evaluate the most recent month will not yield valid results. This design ensures that each evaluation run is backed by a complete six-month observation period, thereby guaranteeing the statistical reliability of the capture-rate and conversion-rate metrics.
 
 
 
