@@ -1,0 +1,28 @@
+WITH rf_closed AS (
+  SELECT
+    LPAD(default.decrypt(rfact_acct), 18, '0')    AS account_num,
+    ods_business_dt,
+    rfact_dt_closed
+  FROM s11_rf.rfsactu_h
+  WHERE rfact_dt_closed IS NOT NULL
+),
+mg_closed AS (
+  SELECT
+    LPAD(default.decrypt(loan_num), 18, '0')      AS account_num,
+    ods_business_dt,
+    delq_payment_count
+  FROM s11_mg.master_all_h
+  WHERE delq_payment_count IS NOT NULL
+)
+
+SELECT
+  c.account_num,
+  c.rfact_dt_closed,
+  c.ods_business_dt    AS rf_business_dt,
+  m.delq_payment_count,
+  m.ods_business_dt    AS mg_business_dt
+FROM rf_closed AS c
+LEFT JOIN mg_closed AS m
+  ON m.account_num     = c.account_num
+ AND m.ods_business_dt = c.ods_business_dt
+;
