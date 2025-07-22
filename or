@@ -1,3 +1,142 @@
+
+from pyspark.sql import SparkSession, functions as F
+from pyspark.sql.types import StructType, StructField, StringType, DoubleType, LongType
+
+spark = SparkSession.builder.appName("CC_Feature_Profiling_DateRange").getOrCreate()
+
+start_date = "2024-01-01"
+end_date   = "2024-06-30"
+
+df_am04 = (
+    spark.table("s11_cp_cnsum.am04_P_h")
+         .filter((F.col("ods_business_dt") >= start_date) & (F.col("ods_business_dt") <= end_date))
+         .select(
+             "gsam_appl_num",
+             "am04_date_most_recent_pd",
+             "am04_amt_most_recent_pd",
+             "am04_date_high_balance_pastdue",
+             "am04_balance_high_pastdue",
+             "am04_cons_days_pastdue"
+         )
+)
+
+df_am02 = (
+    spark.table("s11_cp_cnsum.am02_h")
+         .filter((F.col("ods_business_dt") >= start_date) & (F.col("ods_business_dt") <= end_date))
+         .select(
+             "gsam_appl_num",
+             "am02_date_potential_chargeoff",
+             "am02_balance_prev_statement",
+             "am02_date_chargeoff_reinstated",
+             "am02_balance_current",
+             "am02_balance_high_ltd",
+             "am02_date_first_use",
+             "am02_num_lte_fee_since_lst_cur",
+             "am02_num_ol_fee_lst_w_in_limit",
+             "am02_amt_last_nsf_payment",
+             "am02_date_last_nsf_payment",
+             "am02_num_nsf_payments_ltd",
+             "am02_date_last_paid_balance",
+             "am02_date_last_payment",
+             "am02_amt_ptp_broken_ltd",
+             "am02_num_ptp_broken_ltd",
+             "am02_amt_ptp_kept_ltd",
+             "am02_num_ptp_kept_ltd",
+             "am02_amt_ptp_partial_ltd",
+             "am02_num_ptp_partial_ltd",
+             "am02_mths_consecutive_min_pay"
+         )
+)
+
+df_am00 = (
+    spark.table("s11_cp_cnsum.am00_h")
+         .filter((F.col("ods_business_dt") >= start_date) & (F.col("ods_business_dt") <= end_date))
+         .select(
+             "gsam_appl_num",
+             "am00_date_fraud_flag",
+             "am00_statf_fraud",
+             "am00_date_security_fraud_stat",
+             "am00_statc_security_fraud",
+             "am00_paid_in_full_flag",
+             "am00_statf_highly_active",
+             "am00_statf_active_since_opened",
+             "am00_inactive_flag",
+             "am00_statf_declined_reissue",
+             "am00_statc_chargeoff",
+             "am00_statf_potential_chargeoff",
+             "am00_typec_vip",
+             "am00_statc_current_overlimit",
+             "am00_statc_current_past_due"
+         )
+)
+
+df = df_am04.join(df_am02, "gsam_appl_num", "left") \
+           .join(df_am00, "gsam_appl_num", "left")
+
+all_cols     = [c for c,_ in df.dtypes if c != "gsam_appl_num"]
+numeric_types= ("int","bigint","double","float","long","decimal")
+numeric_cols = [c for c,t in df.dtypes if t in numeric_types]
+n            = df.count()
+
+rows = []
+for c in all_cols:
+    pct_missing = df.filter(F.col(c).isNull()).count() / n
+    distinct    = df.select(F.countDistinct(c)).first()[0]
+    if c in numeric_cols:
+        stats = df.select(
+            F.mean(c).alias("mean"),
+            F.stddev(c).alias("stddev"),
+            F.skewness(c).alias("skewness")
+        ).first()
+        mean, stddev, skewness = stats["mean"], stats["stddev"], stats["skewness"]
+    else:
+        mean = stddev = skewness = None
+    rows.append((c, pct_missing, distinct, mean, stddev, skewness))
+
+schema = StructType([
+    StructField("feature",        StringType(), True),
+    StructField("pct_missing",    DoubleType(), True),
+    StructField("distinct_count", LongType(),   True),
+    StructField("mean",           DoubleType(), True),
+    StructField("stddev",         DoubleType(), True),
+    StructField("skewness",       DoubleType(), True),
+])
+
+summary_df = spark.createDataFrame(rows, schema)
+summary_df.orderBy(F.desc("pct_missing")).show(10, False)
+summary_df.orderBy("distinct_count").show(10, False)
+summary_df.show(truncate=False)
+
+summary_df.coalesce(1) \
+    .write.csv(
+        "cc_feature_profile_{}_to_{}.csv".format(start_date, end_date),
+        header=True,
+        mode="overwrite"
+    )
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 from pyspark.sql import SparkSession, functions as F
 from pyspark.sql.types import StructType, StructField, StringType, DoubleType, LongType
 
