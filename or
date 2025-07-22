@@ -1,3 +1,25 @@
+from pyspark.sql import functions as F
+
+# assume you still have 'summary_df' and the joined df in scope
+
+# find features with extreme skew
+extreme_feats = (
+    summary_df
+    .filter(F.abs(F.col("skewness")) > 10)
+    .select("feature")
+    .rdd.flatMap(lambda row: row)
+    .collect()
+)
+
+# inspect 1st and 99th percentiles
+for feat in extreme_feats:
+    q_low, q_high = df.approxQuantile(feat, [0.01, 0.99], 0.01)
+    print(f"{feat}: 1% → {q_low:.3f}, 99% → {q_high:.3f}")
+
+
+
+
+
 
 from pyspark.sql import SparkSession, functions as F
 from pyspark.sql.types import StructType, StructField, StringType, DoubleType, LongType
