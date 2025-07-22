@@ -1,3 +1,103 @@
+from pyspark.sql import SparkSession, functions as F
+from pyspark.sql.types import StructType, StructField, StringType, DoubleType, LongType
+
+# 1. start Spark
+spark = SparkSession.builder.appName("CC_Feature_Profiling").getOrCreate()
+
+# 2. load and select just the fields you care about
+df_am04 = spark.table("s11_cp_cnsum.am04_P_h").select(
+    "gsam_appl_num",
+    "am04_date_most_recent_pd",   "am04_amt_most_recent_pd",
+    "am04_date_high_balance_pastdue", "am04_balance_high_pastdue",
+    "am04_cons_days_pastdue"
+)
+
+df_am02 = spark.table("s11_cp_cnsum.am02_h").select(
+    "gsam_appl_num",
+    "am02_date_potential_chargeoff", "am02_balance_prev_statement",
+    "am02_date_chargeoff_reinstated", "am02_balance_current",
+    "am02_balance_high_ltd",         "am02_date_first_use",
+    "am02_num_lte_fee_since_lst_cur","am02_num_ol_fee_lst_w_in_limit",
+    "am02_amt_last_nsf_payment",     "am02_date_last_nsf_payment",
+    "am02_num_nsf_payments_ltd",     "am02_date_last_paid_balance",
+    "am02_date_last_payment",        "am02_amt_ptp_broken_ltd",
+    "am02_num_ptp_broken_ltd",       "am02_amt_ptp_kept_ltd",
+    "am02_num_ptp_kept_ltd",         "am02_amt_ptp_partial_ltd",
+    "am02_num_ptp_partial_ltd",      "am02_mths_consecutive_min_pay"
+)
+
+df_am00 = spark.table("s11_cp_cnsum.am00_h").select(
+    "gsam_appl_num",
+    "am00_date_fraud_flag",    "am00_statf_fraud",
+    "am00_date_security_fraud_stat","am00_statc_security_fraud",
+    "am00_paid_in_full_flag",  "am00_statf_highly_active",
+    "am00_statf_active_since_opened","am00_inactive_flag",
+    "am00_statf_declined_reissue","am00_statc_chargeoff",
+    "am00_statf_potential_chargeoff","am00_typec_vip",
+    "am00_statc_current_overlimit","am00_statc_current_past_due"
+)
+
+# 3. join them all on your key
+df = df_am04\
+     .join(df_am02, "gsam_appl_num", "left")\
+     .join(df_am00, "gsam_appl_num", "left")
+
+# 4. helper lists
+all_cols = [c for c,_ in df.dtypes if c != "gsam_appl_num"]
+num_types = ("int","bigint","double","float","long","decimal")
+numeric_cols = [c for c,t in df.dtypes if t in num_types]
+
+# 5. total row count
+n = df.count()
+
+# 6. gather metrics per column
+rows = []
+for c in all_cols:
+    # missing rate
+    pct_miss = df.filter(F.col(c).isNull()).count() / n
+    # distinct count
+    distinct = df.select(F.countDistinct(c)).first()[0]
+    # numeric stats?
+    if c in numeric_cols:
+        stat = df.select(
+            F.mean(c).alias("mean"),
+            F.stddev(c).alias("stddev"),
+            F.skewness(c).alias("skew")
+        ).first()
+        mean, stddev, skew = stat["mean"], stat["stddev"], stat["skew"]
+    else:
+        mean = stddev = skew = None
+    rows.append((c, pct_miss, distinct, mean, stddev, skew))
+
+# 7. build a DataFrame
+schema = StructType([
+    StructField("feature",          StringType(), True),
+    StructField("pct_missing",      DoubleType(), True),
+    StructField("distinct_count",   LongType(),   True),
+    StructField("mean",             DoubleType(), True),
+    StructField("stddev",           DoubleType(), True),
+    StructField("skewness",         DoubleType(), True),
+])
+summary_df = spark.createDataFrame(rows, schema)
+
+# 8. inspect
+print("Most sparse features:")
+summary_df.orderBy(F.desc("pct_missing")).show(10, False)
+
+print("Lowest‑cardinality features:")
+summary_df.orderBy("distinct_count").show(10, False)
+
+print("Full feature summary:")
+summary_df.show(truncate=False)
+
+# 9. (optional) write out for deeper analysis in pandas or Excel
+summary_df.coalesce(1) \
+    .write.csv("cc_feature_profile.csv", header=True, mode="overwrite")
+
+
+
+
+
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
