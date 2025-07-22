@@ -1,3 +1,128 @@
+from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
+
+# start Spark
+spark = SparkSession.builder.appName("CC_Feature_Analysis").getOrCreate()
+
+# 1. load each table and pick only the CC columns + the join key
+df_am04 = spark.table("s11_cp_cnsum.am04_P_h").select(
+    "gsam_appl_num",
+    "am04_date_most_recent_pd",
+    "am04_amt_most_recent_pd",
+    "am04_date_high_balance_pastdue",
+    "am04_balance_high_pastdue",
+    "am04_cons_days_pastdue"
+)
+
+df_am02 = spark.table("s11_cp_cnsum.am02_h").select(
+    "gsam_appl_num",
+    "am02_date_potential_chargeoff",
+    "am02_balance_prev_statement",
+    "am02_date_chargeoff_reinstated",
+    "am02_balance_current",
+    "am02_balance_high_ltd",
+    "am02_date_first_use",
+    "am02_num_lte_fee_since_lst_cur",
+    "am02_num_ol_fee_lst_w_in_limit",
+    "am02_amt_last_nsf_payment",
+    "am02_date_last_nsf_payment",
+    "am02_num_nsf_payments_ltd",
+    "am02_date_last_paid_balance",
+    "am02_date_last_payment",
+    "am02_amt_ptp_broken_ltd",
+    "am02_num_ptp_broken_ltd",
+    "am02_amt_ptp_kept_ltd",
+    "am02_num_ptp_kept_ltd",
+    "am02_amt_ptp_partial_ltd",
+    "am02_num_ptp_partial_ltd",
+    "am02_mths_consecutive_min_pay"
+)
+
+df_am00 = spark.table("s11_cp_cnsum.am00_h").select(
+    "gsam_appl_num",
+    "am00_date_fraud_flag",
+    "am00_statf_fraud",
+    "am00_date_security_fraud_stat",
+    "am00_statc_security_fraud",
+    "am00_paid_in_full_flag",
+    "am00_statf_highly_active",
+    "am00_statf_active_since_opened",
+    "am00_inactive_flag",
+    "am00_statf_declined_reissue",
+    "am00_statc_chargeoff",
+    "am00_statf_potential_chargeoff",
+    "am00_typec_vip",
+    "am00_statc_current_overlimit",
+    "am00_statc_current_past_due"
+)
+
+# 2. join them all
+df = (
+    df_am04
+    .join(df_am02, "gsam_appl_num", "left")
+    .join(df_am00, "gsam_appl_num", "left")
+)
+
+# 3. specify your target column here (if you have one)
+target_col = "target"  # replace with your actual label
+
+# 4. prepare lists of columns
+all_cols = [c for c, _ in df.dtypes if c != "gsam_appl_num"]
+num_types = ("int", "bigint", "double", "float", "long", "decimal")
+numeric_cols = [c for c, t in df.dtypes if t in num_types and c != target_col]
+other_cols   = [c for c in all_cols if c not in numeric_cols + [target_col]]
+
+# 5. get total row count
+n = df.count()
+
+# 6. build up per-column metrics
+rows = []
+for c in all_cols:
+    missing = df.filter(F.col(c).isNull()).count() / n
+    distinct = df.select(F.countDistinct(c)).first()[0]
+    mean_v, std_v, skew_v = (None, None, None)
+    corr_v = None
+
+    if c in numeric_cols:
+        stats = df.select(
+            F.mean(c).alias("mean"),
+            F.stddev(c).alias("std"),
+            F.skewness(c).alias("skew")
+        ).first()
+        mean_v, std_v, skew_v = stats["mean"], stats["std"], stats["skew"]
+        if target_col in df.columns:
+            corr_v = df.stat.corr(c, target_col)
+
+    rows.append((c, missing, distinct, mean_v, std_v, skew_v, corr_v))
+
+# 7. convert to a Spark DataFrame and show
+schema = ["feature","pct_missing","distinct_count","mean","stddev","skew","corr_with_target"]
+summary_df = spark.createDataFrame(rows, schema=schema)
+
+# 8. order by absolute correlation if available, else by percent missing
+if target_col in df.columns:
+    summary_df = summary_df.orderBy(F.desc(F.abs(F.col("corr_with_target"))))
+else:
+    summary_df = summary_df.orderBy(F.desc("pct_missing"))
+
+summary_df.show(truncate=False)
+
+# 9. (optional) write out to CSV for deeper analysis
+summary_df.coalesce(1).write.csv("cc_feature_summary.csv", header=True, mode="overwrite")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 WITH rf_closed AS (
   SELECT
     LPAD(default.decrypt(rfact_acct), 18, '0')    AS account_num,
