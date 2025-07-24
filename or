@@ -1,375 +1,197 @@
-from pyspark.sql import functions as F
+# credit_card.py (inside src/fraud_origination/customer_score/cs_v2/data)
+from pyspark.sql import SparkSession, DataFrame, functions as F
+from datetime import datetime, timedelta
+from dateutil.relativedelta import relativedelta
+from functools import reduce
 
-# assume you still have 'summary_df' and the joined df in scope
-
-# find features with extreme skew
-extreme_feats = (
-    summary_df
-    .filter(F.abs(F.col("skewness")) > 10)
-    .select("feature")
-    .rdd.flatMap(lambda row: row)
-    .collect()
-)
-
-# inspect 1st and 99th percentiles
-for feat in extreme_feats:
-    q_low, q_high = df.approxQuantile(feat, [0.01, 0.99], 0.01)
-    print(f"{feat}: 1% → {q_low:.3f}, 99% → {q_high:.3f}")
+from fraud_origination.customer_score.cs_v2.data_dev.features.training_data_utils import get_pop_accounts
 
 
+def cc_account_history(
+    spark: SparkSession,
+    first_date: str,
+    last_date: str,
+    acct_df: Union[DataFrame, None] = None
+) -> DataFrame:
+    """
+    Returns the raw CC account history between first_date and last_date (inclusive),
+    filtered to product = 'CC' and extracting the last-9 digits for joining.
+    """
+    # load and filter am04
+    df_am04 = (
+        spark.table("s11_cp_cnsum.am04_P_h")
+             .filter(F.col("ods_business_dt").between(first_date, last_date))
+             .filter(F.col("prodcode") == "CC")
+             # only consumer cards: first char 'C'
+             .filter(F.substring(F.col("account_num"), 1, 1) == "C")
+             .select(
+                 F.col("gsam_appl_num").cast("bigint").alias("account_num"),
+                 "ods_business_dt",
+                 "am04_date_most_recent_pd",
+                 "am04_amt_most_recent_pd",
+                 "am04_date_high_balance_pastdue",
+                 "am04_balance_high_pastdue",
+                 "am04_cons_days_pastdue"
+             )
+    )
 
+    df_am02 = (
+        spark.table("s11_cp_cnsum.am02_h")
+             .filter(F.col("ods_business_dt").between(first_date, last_date))
+             .filter(F.col("prodcode") == "CC")
+             .filter(F.substring(F.col("account_num"), 1, 1) == "C")
+             .select(
+                 F.col("gsam_appl_num").cast("bigint").alias("account_num"),
+                 "ods_business_dt",
+                 "am02_date_potential_chargeoff",
+                 "am02_balance_prev_statement",
+                 "am02_date_chargeoff_reinstated",
+                 "am02_balance_current",
+                 "am02_balance_high_ltd",
+                 "am02_date_first_use",
+                 "am02_num_lte_fee_since_lst_cur",
+                 "am02_num_ol_fee_lst_w_in_limit",
+                 "am02_amt_last_nsf_payment",
+                 "am02_date_last_nsf_payment",
+                 "am02_num_nsf_payments_ltd",
+                 "am02_date_last_paid_balance",
+                 "am02_date_last_payment",
+                 "am02_amt_ptp_broken_ltd",
+                 "am02_num_ptp_broken_ltd",
+                 "am02_amt_ptp_kept_ltd",
+                 "am02_num_ptp_kept_ltd",
+                 "am02_amt_ptp_partial_ltd",
+                 "am02_num_ptp_partial_ltd",
+                 "am02_mths_consecutive_min_pay"
+             )
+    )
 
+    df_am00 = (
+        spark.table("s11_cp_cnsum.am00_h")
+             .filter(F.col("ods_business_dt").between(first_date, last_date))
+             .filter(F.col("prodcode") == "CC")
+             .filter(F.substring(F.col("account_num"), 1, 1) == "C")
+             .select(
+                 F.col("gsam_appl_num").cast("bigint").alias("account_num"),
+                 "ods_business_dt",
+                 "am00_date_fraud_flag",
+                 "am00_statf_fraud",
+                 "am00_date_security_fraud_stat",
+                 "am00_statc_security_fraud",
+                 "am00_paid_in_full_flag",
+                 "am00_statf_highly_active",
+                 "am00_statf_active_since_opened",
+                 "am00_inactive_flag",
+                 "am00_statf_declined_reissue",
+                 "am00_statc_chargeoff",
+                 "am00_statf_potential_chargeoff",
+                 "am00_typec_vip",
+                 "am00_statc_current_overlimit",
+                 "am00_statc_current_past_due"
+             )
+    )
 
-
-from pyspark.sql import SparkSession, functions as F
-from pyspark.sql.types import StructType, StructField, StringType, DoubleType, LongType
-
-spark = SparkSession.builder.appName("CC_Feature_Profiling_DateRange").getOrCreate()
-
-start_date = "2024-01-01"
-end_date   = "2024-06-30"
-
-df_am04 = (
-    spark.table("s11_cp_cnsum.am04_P_h")
-         .filter((F.col("ods_business_dt") >= start_date) & (F.col("ods_business_dt") <= end_date))
-         .select(
-             "gsam_appl_num",
-             "am04_date_most_recent_pd",
-             "am04_amt_most_recent_pd",
-             "am04_date_high_balance_pastdue",
-             "am04_balance_high_pastdue",
-             "am04_cons_days_pastdue"
-         )
-)
-
-df_am02 = (
-    spark.table("s11_cp_cnsum.am02_h")
-         .filter((F.col("ods_business_dt") >= start_date) & (F.col("ods_business_dt") <= end_date))
-         .select(
-             "gsam_appl_num",
-             "am02_date_potential_chargeoff",
-             "am02_balance_prev_statement",
-             "am02_date_chargeoff_reinstated",
-             "am02_balance_current",
-             "am02_balance_high_ltd",
-             "am02_date_first_use",
-             "am02_num_lte_fee_since_lst_cur",
-             "am02_num_ol_fee_lst_w_in_limit",
-             "am02_amt_last_nsf_payment",
-             "am02_date_last_nsf_payment",
-             "am02_num_nsf_payments_ltd",
-             "am02_date_last_paid_balance",
-             "am02_date_last_payment",
-             "am02_amt_ptp_broken_ltd",
-             "am02_num_ptp_broken_ltd",
-             "am02_amt_ptp_kept_ltd",
-             "am02_num_ptp_kept_ltd",
-             "am02_amt_ptp_partial_ltd",
-             "am02_num_ptp_partial_ltd",
-             "am02_mths_consecutive_min_pay"
-         )
-)
-
-df_am00 = (
-    spark.table("s11_cp_cnsum.am00_h")
-         .filter((F.col("ods_business_dt") >= start_date) & (F.col("ods_business_dt") <= end_date))
-         .select(
-             "gsam_appl_num",
-             "am00_date_fraud_flag",
-             "am00_statf_fraud",
-             "am00_date_security_fraud_stat",
-             "am00_statc_security_fraud",
-             "am00_paid_in_full_flag",
-             "am00_statf_highly_active",
-             "am00_statf_active_since_opened",
-             "am00_inactive_flag",
-             "am00_statf_declined_reissue",
-             "am00_statc_chargeoff",
-             "am00_statf_potential_chargeoff",
-             "am00_typec_vip",
-             "am00_statc_current_overlimit",
-             "am00_statc_current_past_due"
-         )
-)
-
-df = df_am04.join(df_am02, "gsam_appl_num", "left") \
-           .join(df_am00, "gsam_appl_num", "left")
-
-all_cols     = [c for c,_ in df.dtypes if c != "gsam_appl_num"]
-numeric_types= ("int","bigint","double","float","long","decimal")
-numeric_cols = [c for c,t in df.dtypes if t in numeric_types]
-n            = df.count()
-
-rows = []
-for c in all_cols:
-    pct_missing = df.filter(F.col(c).isNull()).count() / n
-    distinct    = df.select(F.countDistinct(c)).first()[0]
-    if c in numeric_cols:
-        stats = df.select(
-            F.mean(c).alias("mean"),
-            F.stddev(c).alias("stddev"),
-            F.skewness(c).alias("skewness")
-        ).first()
-        mean, stddev, skewness = stats["mean"], stats["stddev"], stats["skewness"]
-    else:
-        mean = stddev = skewness = None
-    rows.append((c, pct_missing, distinct, mean, stddev, skewness))
-
-schema = StructType([
-    StructField("feature",        StringType(), True),
-    StructField("pct_missing",    DoubleType(), True),
-    StructField("distinct_count", LongType(),   True),
-    StructField("mean",           DoubleType(), True),
-    StructField("stddev",         DoubleType(), True),
-    StructField("skewness",       DoubleType(), True),
-])
-
-summary_df = spark.createDataFrame(rows, schema)
-summary_df.orderBy(F.desc("pct_missing")).show(10, False)
-summary_df.orderBy("distinct_count").show(10, False)
-summary_df.show(truncate=False)
-
-summary_df.coalesce(1) \
-    .write.csv(
-        "cc_feature_profile_{}_to_{}.csv".format(start_date, end_date),
-        header=True,
-        mode="overwrite"
+    # join all three histories
+    return (
+        df_am04
+        .unionByName(df_am02)
+        .unionByName(df_am00)
+        # if you have an acct_df filter, apply it here
+        if acct_df is None else
+        (
+            df_am04.join(acct_df, "account_num", "inner")
+            .unionByName(df_am02.join(acct_df, "account_num", "inner"))
+            .unionByName(df_am00.join(acct_df, "account_num", "inner"))
+        )
     )
 
 
+def get_cc_features(
+    spark: SparkSession,
+    first_balance_lookup_dt: str,
+    last_lookup_dt: str,
+    pop_df: DataFrame
+) -> DataFrame:
+    """
+    Produce one row per account in pop_df with the main CC features:
+      - balances (current, prev, high LTD, max/min/avg)
+      - delinquency recency & counts
+      - NSF & late-fee counts and amounts
+      - PTP broken vs. kept
+      - overlimit & past-due flags
+      - fraud & chargeoff flags
+      - activity / VIP flags
+    """
+    # 1. grab raw history
+    cc_hist = cc_account_history(
+        spark,
+        first_date=first_balance_lookup_dt,
+        last_date=last_lookup_dt,
+        acct_df=pop_df.select(F.col("account_num").cast("bigint"))
+    )
 
+    # 2. join back to pop
+    joined = (
+        pop_df.alias("pop")
+        .join(cc_hist.alias("h"), F.col("pop.account_num") == F.col("h.account_num"), "left")
+    )
 
+    # 3. aggregate per account
+    feats = (
+        joined.groupBy("pop.account_num")
+        .agg(
+            # balance features
+            F.max("h.am02_balance_current").alias("cc_bal_current_max"),
+            F.max("h.am02_balance_prev_statement").alias("cc_bal_prev_max"),
+            F.max("h.am04_balance_high_pastdue").alias("cc_high_bal_pastdue_max"),
 
+            F.avg("h.am02_balance_current").alias("cc_bal_current_avg"),
+            F.avg("h.am02_balance_prev_statement").alias("cc_bal_prev_avg"),
 
+            # delinquency recency & count
+            F.max("h.am04_date_most_recent_pd").alias("cc_date_last_pd"),
+            (F.datediff(F.lit(last_lookup_dt), F.max("h.am04_date_most_recent_pd")))
+                .alias("cc_days_since_last_pd"),
+            F.sum(F.when(F.col("h.am04_cons_days_pastdue") > 0, 1).otherwise(0))
+                .alias("cc_pastdue_event_count"),
 
+            # NSF & late-fee
+            F.sum("h.am02_num_nsf_payments_ltd").alias("cc_nsf_count"),
+            F.max("h.am02_amt_last_nsf_payment").alias("cc_amt_last_nsf"),
+            F.sum("h.am02_num_lte_fee_since_lst_cur").alias("cc_latefee_count"),
 
+            # PTP behavior
+            F.sum("h.am02_num_ptp_broken_ltd").alias("cc_ptp_broken_count"),
+            F.sum("h.am02_amt_ptp_broken_ltd").alias("cc_ptp_broken_amt"),
+            F.sum("h.am02_num_ptp_kept_ltd").alias("cc_ptp_kept_count"),
 
+            # overlimit & past-due flags (null→0 + flag)
+            F.coalesce(F.max("h.am00_statc_current_past_due"), F.lit(0))
+                .alias("cc_past_due_amt"),
+            F.when(F.max("h.am00_statc_current_past_due").isNull(), 0).otherwise(1)
+                .alias("cc_past_due_flag"),
 
+            F.when(F.max("h.am00_statc_current_overlimit") == "Y", 1).otherwise(0)
+                .alias("cc_overlimit_flag"),
 
+            # fraud & chargeoff
+            F.when(F.max("h.am00_statf_fraud") == "Y", 1).otherwise(0)
+                .alias("cc_fraud_flag"),
+            F.when(F.max("h.am00_statf_potential_chargeoff") == "Y", 1).otherwise(0)
+                .alias("cc_potential_chargeoff_flag"),
 
+            # activity / VIP
+            F.when(F.max("h.am00_statf_highly_active") == "Y", 1).otherwise(0)
+                .alias("cc_highly_active_flag"),
+            F.when(F.max("h.am00_statf_active_since_opened") == "Y", 1).otherwise(0)
+                .alias("cc_ever_active_flag"),
+            F.when(F.max("h.am00_typec_vip") == "Y", 1).otherwise(0)
+                .alias("cc_vip_flag")
+        )
+    )
 
+    return feats
 
-
-
-
-
-
-
-
-
-
-
-from pyspark.sql import SparkSession, functions as F
-from pyspark.sql.types import StructType, StructField, StringType, DoubleType, LongType
-
-# 1. start Spark
-spark = SparkSession.builder.appName("CC_Feature_Profiling").getOrCreate()
-
-# 2. load and select just the fields you care about
-df_am04 = spark.table("s11_cp_cnsum.am04_P_h").select(
-    "gsam_appl_num",
-    "am04_date_most_recent_pd",   "am04_amt_most_recent_pd",
-    "am04_date_high_balance_pastdue", "am04_balance_high_pastdue",
-    "am04_cons_days_pastdue"
-)
-
-df_am02 = spark.table("s11_cp_cnsum.am02_h").select(
-    "gsam_appl_num",
-    "am02_date_potential_chargeoff", "am02_balance_prev_statement",
-    "am02_date_chargeoff_reinstated", "am02_balance_current",
-    "am02_balance_high_ltd",         "am02_date_first_use",
-    "am02_num_lte_fee_since_lst_cur","am02_num_ol_fee_lst_w_in_limit",
-    "am02_amt_last_nsf_payment",     "am02_date_last_nsf_payment",
-    "am02_num_nsf_payments_ltd",     "am02_date_last_paid_balance",
-    "am02_date_last_payment",        "am02_amt_ptp_broken_ltd",
-    "am02_num_ptp_broken_ltd",       "am02_amt_ptp_kept_ltd",
-    "am02_num_ptp_kept_ltd",         "am02_amt_ptp_partial_ltd",
-    "am02_num_ptp_partial_ltd",      "am02_mths_consecutive_min_pay"
-)
-
-df_am00 = spark.table("s11_cp_cnsum.am00_h").select(
-    "gsam_appl_num",
-    "am00_date_fraud_flag",    "am00_statf_fraud",
-    "am00_date_security_fraud_stat","am00_statc_security_fraud",
-    "am00_paid_in_full_flag",  "am00_statf_highly_active",
-    "am00_statf_active_since_opened","am00_inactive_flag",
-    "am00_statf_declined_reissue","am00_statc_chargeoff",
-    "am00_statf_potential_chargeoff","am00_typec_vip",
-    "am00_statc_current_overlimit","am00_statc_current_past_due"
-)
-
-# 3. join them all on your key
-df = df_am04\
-     .join(df_am02, "gsam_appl_num", "left")\
-     .join(df_am00, "gsam_appl_num", "left")
-
-# 4. helper lists
-all_cols = [c for c,_ in df.dtypes if c != "gsam_appl_num"]
-num_types = ("int","bigint","double","float","long","decimal")
-numeric_cols = [c for c,t in df.dtypes if t in num_types]
-
-# 5. total row count
-n = df.count()
-
-# 6. gather metrics per column
-rows = []
-for c in all_cols:
-    # missing rate
-    pct_miss = df.filter(F.col(c).isNull()).count() / n
-    # distinct count
-    distinct = df.select(F.countDistinct(c)).first()[0]
-    # numeric stats?
-    if c in numeric_cols:
-        stat = df.select(
-            F.mean(c).alias("mean"),
-            F.stddev(c).alias("stddev"),
-            F.skewness(c).alias("skew")
-        ).first()
-        mean, stddev, skew = stat["mean"], stat["stddev"], stat["skew"]
-    else:
-        mean = stddev = skew = None
-    rows.append((c, pct_miss, distinct, mean, stddev, skew))
-
-# 7. build a DataFrame
-schema = StructType([
-    StructField("feature",          StringType(), True),
-    StructField("pct_missing",      DoubleType(), True),
-    StructField("distinct_count",   LongType(),   True),
-    StructField("mean",             DoubleType(), True),
-    StructField("stddev",           DoubleType(), True),
-    StructField("skewness",         DoubleType(), True),
-])
-summary_df = spark.createDataFrame(rows, schema)
-
-# 8. inspect
-print("Most sparse features:")
-summary_df.orderBy(F.desc("pct_missing")).show(10, False)
-
-print("Lowest‑cardinality features:")
-summary_df.orderBy("distinct_count").show(10, False)
-
-print("Full feature summary:")
-summary_df.show(truncate=False)
-
-# 9. (optional) write out for deeper analysis in pandas or Excel
-summary_df.coalesce(1) \
-    .write.csv("cc_feature_profile.csv", header=True, mode="overwrite")
-
-
-
-
-
-from pyspark.sql import SparkSession
-from pyspark.sql import functions as F
-
-# start Spark
-spark = SparkSession.builder.appName("CC_Feature_Analysis").getOrCreate()
-
-# 1. load each table and pick only the CC columns + the join key
-df_am04 = spark.table("s11_cp_cnsum.am04_P_h").select(
-    "gsam_appl_num",
-    "am04_date_most_recent_pd",
-    "am04_amt_most_recent_pd",
-    "am04_date_high_balance_pastdue",
-    "am04_balance_high_pastdue",
-    "am04_cons_days_pastdue"
-)
-
-df_am02 = spark.table("s11_cp_cnsum.am02_h").select(
-    "gsam_appl_num",
-    "am02_date_potential_chargeoff",
-    "am02_balance_prev_statement",
-    "am02_date_chargeoff_reinstated",
-    "am02_balance_current",
-    "am02_balance_high_ltd",
-    "am02_date_first_use",
-    "am02_num_lte_fee_since_lst_cur",
-    "am02_num_ol_fee_lst_w_in_limit",
-    "am02_amt_last_nsf_payment",
-    "am02_date_last_nsf_payment",
-    "am02_num_nsf_payments_ltd",
-    "am02_date_last_paid_balance",
-    "am02_date_last_payment",
-    "am02_amt_ptp_broken_ltd",
-    "am02_num_ptp_broken_ltd",
-    "am02_amt_ptp_kept_ltd",
-    "am02_num_ptp_kept_ltd",
-    "am02_amt_ptp_partial_ltd",
-    "am02_num_ptp_partial_ltd",
-    "am02_mths_consecutive_min_pay"
-)
-
-df_am00 = spark.table("s11_cp_cnsum.am00_h").select(
-    "gsam_appl_num",
-    "am00_date_fraud_flag",
-    "am00_statf_fraud",
-    "am00_date_security_fraud_stat",
-    "am00_statc_security_fraud",
-    "am00_paid_in_full_flag",
-    "am00_statf_highly_active",
-    "am00_statf_active_since_opened",
-    "am00_inactive_flag",
-    "am00_statf_declined_reissue",
-    "am00_statc_chargeoff",
-    "am00_statf_potential_chargeoff",
-    "am00_typec_vip",
-    "am00_statc_current_overlimit",
-    "am00_statc_current_past_due"
-)
-
-# 2. join them all
-df = (
-    df_am04
-    .join(df_am02, "gsam_appl_num", "left")
-    .join(df_am00, "gsam_appl_num", "left")
-)
-
-# 3. specify your target column here (if you have one)
-target_col = "target"  # replace with your actual label
-
-# 4. prepare lists of columns
-all_cols = [c for c, _ in df.dtypes if c != "gsam_appl_num"]
-num_types = ("int", "bigint", "double", "float", "long", "decimal")
-numeric_cols = [c for c, t in df.dtypes if t in num_types and c != target_col]
-other_cols   = [c for c in all_cols if c not in numeric_cols + [target_col]]
-
-# 5. get total row count
-n = df.count()
-
-# 6. build up per-column metrics
-rows = []
-for c in all_cols:
-    missing = df.filter(F.col(c).isNull()).count() / n
-    distinct = df.select(F.countDistinct(c)).first()[0]
-    mean_v, std_v, skew_v = (None, None, None)
-    corr_v = None
-
-    if c in numeric_cols:
-        stats = df.select(
-            F.mean(c).alias("mean"),
-            F.stddev(c).alias("std"),
-            F.skewness(c).alias("skew")
-        ).first()
-        mean_v, std_v, skew_v = stats["mean"], stats["std"], stats["skew"]
-        if target_col in df.columns:
-            corr_v = df.stat.corr(c, target_col)
-
-    rows.append((c, missing, distinct, mean_v, std_v, skew_v, corr_v))
-
-# 7. convert to a Spark DataFrame and show
-schema = ["feature","pct_missing","distinct_count","mean","stddev","skew","corr_with_target"]
-summary_df = spark.createDataFrame(rows, schema=schema)
-
-# 8. order by absolute correlation if available, else by percent missing
-if target_col in df.columns:
-    summary_df = summary_df.orderBy(F.desc(F.abs(F.col("corr_with_target"))))
-else:
-    summary_df = summary_df.orderBy(F.desc("pct_missing"))
-
-summary_df.show(truncate=False)
-
-# 9. (optional) write out to CSV for deeper analysis
-summary_df.coalesce(1).write.csv("cc_feature_summary.csv", header=True, mode="overwrite")
 
 
 
