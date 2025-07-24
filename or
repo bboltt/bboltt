@@ -1,16 +1,20 @@
+```python
+# credit_card_features.py
 from pyspark.sql import SparkSession, DataFrame, functions as F
 from typing import Optional
 from functools import reduce
 
 
-def get_am02_features(
+def cc_balance_history(
     spark: SparkSession,
     first_date: str,
-    last_date: str
+    last_date: str,
+    acct_df: Optional[DataFrame] = None
 ) -> DataFrame:
     """
-    Extract and aggregate features from am02_h (full account history).
-    Transforms date fields into days since (relative to ods_business_dt).  
+    Extract and aggregate full balance history (AM02) for credit-card accounts between first_date and last_date.
+    Optionally filters to the accounts in acct_df.
+    Transforms date fields into days-since (relative to ods_business_dt).
     """
     df = (
         spark.table("s11_cp_cnsum.am02_h")
@@ -42,27 +46,31 @@ def get_am02_features(
                  "am02_mths_consecutive_min_pay"
              )
     )
+    if acct_df is not None:
+        df = df.join(
+            acct_df.select(F.col("account_num").cast("bigint")).distinct(),
+            on="account_num", how="inner"
+        )
 
-    # convert date fields into "days since"
-    for col_name in [
+    # convert date fields into days-since
+    date_cols = [
         "am02_date_potential_chargeoff",
         "am02_date_chargeoff_reinstated",
         "am02_date_first_use",
         "am02_date_last_nsf_payment",
         "am02_date_last_paid_balance",
         "am02_date_last_payment"
-    ]:
+    ]
+    for col_name in date_cols:
         df = df.withColumn(
             f"ds_{col_name}",
             F.datediff(F.col("ods_business_dt"), F.col(col_name))
-        )
-        df = df.drop(col_name)
+        ).drop(col_name)
 
     # aggregate per account
-    feats = (
+    return (
         df.groupBy("account_num")
           .agg(
-              # recency: use minimum days since (most recent event)
               F.min("ds_am02_date_potential_chargeoff").alias("cc_days_since_potential_chargeoff"),
               F.min("ds_am02_date_chargeoff_reinstated").alias("cc_days_since_chargeoff_reinstated"),
               F.min("ds_am02_date_first_use").alias("cc_days_since_first_use"),
@@ -70,18 +78,15 @@ def get_am02_features(
               F.min("ds_am02_date_last_paid_balance").alias("cc_days_since_last_paid"),
               F.min("ds_am02_date_last_payment").alias("cc_days_since_last_payment"),
 
-              # balance stats
               F.max("am02_balance_current").alias("cc_bal_current_max"),
               F.max("am02_balance_prev_statement").alias("cc_bal_prev_max"),
               F.max("am02_balance_high_ltd").alias("cc_bal_high_ltd_max"),
 
-              # fee & NSF counts
               F.sum("am02_num_lte_fee_since_lst_cur").alias("cc_latefee_count"),
               F.sum("am02_num_ol_fee_lst_w_in_limit").alias("cc_overlimit_event_count"),
               F.sum("am02_num_nsf_payments_ltd").alias("cc_nsf_count"),
               F.max("am02_amt_last_nsf_payment").alias("cc_last_nsf_amt"),
 
-              # PTP behavior
               F.sum("am02_num_ptp_broken_ltd").alias("cc_ptp_broken_count"),
               F.sum("am02_amt_ptp_broken_ltd").alias("cc_ptp_broken_amt"),
               F.sum("am02_num_ptp_kept_ltd").alias("cc_ptp_kept_count"),
@@ -89,20 +94,19 @@ def get_am02_features(
               F.sum("am02_num_ptp_partial_ltd").alias("cc_ptp_partial_count"),
               F.sum("am02_amt_ptp_partial_ltd").alias("cc_ptp_partial_amt"),
 
-              # months of consecutive minimum pay
               F.max("am02_mths_consecutive_min_pay").alias("cc_months_min_pay_max")
           )
     )
-    return feats
 
 
-def get_am04_features(
+def cc_pd_history(
     spark: SparkSession,
     first_date: str,
-    last_date: str
+    last_date: str,
+    acct_df: Optional[DataFrame] = None
 ) -> DataFrame:
     """
-    Extract and aggregate features from am04_P_h (past-due/overlimit/PTP events only).
+    Extract and aggregate past-due / overlimit / PTP events (AM04) between first_date and last_date.
     """
     df = (
         spark.table("s11_cp_cnsum.am04_P_h")
@@ -119,14 +123,20 @@ def get_am04_features(
                  "am04_cons_days_pastdue"
              )
     )
+    if acct_df is not None:
+        df = df.join(
+            acct_df.select(F.col("account_num").cast("bigint")).distinct(),
+            on="account_num", how="inner"
+        )
 
-    for col_name in ["am04_date_most_recent_pd", "am04_date_high_balance_pastdue"]:
+    date_cols = ["am04_date_most_recent_pd", "am04_date_high_balance_pastdue"]
+    for col_name in date_cols:
         df = df.withColumn(
             f"ds_{col_name}",
             F.datediff(F.col("ods_business_dt"), F.col(col_name))
         ).drop(col_name)
 
-    feats = (
+    return (
         df.groupBy("account_num")
           .agg(
               F.min("ds_am04_date_most_recent_pd").alias("cc_days_since_last_pd"),
@@ -136,16 +146,16 @@ def get_am04_features(
               F.max("am04_cons_days_pastdue").alias("cc_cons_pd_days_max")
           )
     )
-    return feats
 
 
-def get_am00_features(
+def cc_status_history(
     spark: SparkSession,
     first_date: str,
-    last_date: str
+    last_date: str,
+    acct_df: Optional[DataFrame] = None
 ) -> DataFrame:
     """
-    Extract and aggregate flags & fraud from am00_h.
+    Extract and aggregate account-status and fraud flags (AM00) between first_date and last_date.
     """
     df = (
         spark.table("s11_cp_cnsum.am00_h")
@@ -171,34 +181,32 @@ def get_am00_features(
                  "am00_statc_current_past_due"
              )
     )
-    # date fields -> days since
+    if acct_df is not None:
+        df = df.join(
+            acct_df.select(F.col("account_num").cast("bigint")).distinct(),
+            on="account_num", how="inner"
+        )
+
     for col_name in ["am00_date_fraud_flag", "am00_date_security_fraud_stat"]:
         df = df.withColumn(
             f"ds_{col_name}",
             F.datediff(F.col("ods_business_dt"), F.col(col_name))
         ).drop(col_name)
 
-    feats = (
+    return (
         df.groupBy("account_num")
           .agg(
-              # fraud recency + flag
               F.min("ds_am00_date_fraud_flag").alias("cc_days_since_fraud_flag"),
               F.when(F.max("am00_statf_fraud") == "Y", 1).otherwise(0)
                .alias("cc_fraud_flag"),
               F.min("ds_am00_date_security_fraud_stat")
-               .alias("cc_days_since_security_fraud"),
-
-              # potential chargeoff
+               .alias("cc_days_since_security_flag"),
               F.when(F.max("am00_statf_potential_chargeoff") == "Y", 1).otherwise(0)
                .alias("cc_potential_chargeoff_flag"),
-
-              # overlimit & past due flags
               F.when(F.max("am00_statc_current_overlimit").isNotNull(), 1).otherwise(0)
                .alias("cc_overlimit_flag"),
               F.when(F.max("am00_statc_current_past_due").isNotNull(), 1).otherwise(0)
                .alias("cc_past_due_flag"),
-
-              # activity & VIP
               F.when(F.max("am00_statf_highly_active") == "Y", 1).otherwise(0)
                .alias("cc_highly_active_flag"),
               F.when(F.max("am00_statf_active_since_opened") == "Y", 1).otherwise(0)
@@ -207,27 +215,28 @@ def get_am00_features(
                .alias("cc_vip_flag")
           )
     )
-    return feats
 
 
-def get_cc_features(
+def cc_features(
     spark: SparkSession,
     first_date: str,
-    last_date: str
+    last_date: str,
+    acct_df: Optional[DataFrame] = None
 ) -> DataFrame:
     """
-    Combine AM02, AM04 and AM00 feature sets into one wide table keyed by account_num.
+    Combine balance, past-due and status feature sets into one wide table keyed by account_num.
     """
-    am02 = get_am02_features(spark, first_date, last_date)
-    am04 = get_am04_features(spark, first_date, last_date)
-    am00 = get_am00_features(spark, first_date, last_date)
-
-    # left-join all three
-    joined = reduce(
+    funcs = [
+        lambda: cc_balance_history(spark, first_date, last_date, acct_df),
+        lambda: cc_pd_history(spark, first_date, last_date, acct_df),
+        lambda: cc_status_history(spark, first_date, last_date, acct_df)
+    ]
+    return reduce(
         lambda left, right: left.join(right, "account_num", "left"),
-        [am02, am04, am00]
+        [f() for f in funcs]
     )
-    return joined
+```
+
 
 
 
