@@ -217,24 +217,51 @@ def cc_status_history(
     )
 
 
-def cc_features(
+def get_cc_features(
     spark: SparkSession,
-    first_date: str,
-    last_date: str,
-    acct_df: Optional[DataFrame] = None
+    first_balance_lookup_dt: str,
+    last_lookup_dt: str,
+    pop_df: DataFrame,
+    first_rcif_lookup_dt: Optional[str] = None
 ) -> DataFrame:
     """
-    Combine balance, past-due and status feature sets into one wide table keyed by account_num.
+    Combine balance, past-due and status features for all credit-card accounts in pop_df.
+    Determines acct_df from pop_df (or via SSN-based RCIF lookup), normalizes account_num for joins,
+    then calls cc_balance_history, cc_pd_history, cc_status_history with that acct_df.
     """
-    funcs = [
-        lambda: cc_balance_history(spark, first_date, last_date, acct_df),
-        lambda: cc_pd_history(spark, first_date, last_date, acct_df),
-        lambda: cc_status_history(spark, first_date, last_date, acct_df)
-    ]
-    return reduce(
-        lambda left, right: left.join(right, "account_num", "left"),
-        [f() for f in funcs]
+    # Determine the set of accounts to use
+    if "account_num" not in pop_df.columns:
+        acct_df = get_pop_accounts(
+            spark,
+            first_lookup_dt=first_rcif_lookup_dt,
+            last_lookup_dt=last_lookup_dt,
+            pop_df=pop_df
+        )
+    else:
+        acct_df = pop_df
+
+    # Filter and normalize acct_df for CC products, extracting last 9 digits as bigint
+    acct_df = (
+        acct_df
+        .filter(F.col("prodcode") == "CC")
+        .filter(F.substring(F.col("account_num"), 1, 7) == "0000011")
+        .withColumn(
+            "account_num",
+            F.substring(F.col("account_num"), -9, 9).cast("bigint")
+        )
     )
+
+    # Generate feature sets
+    bal_feats = cc_balance_history(spark, first_balance_lookup_dt, last_lookup_dt, acct_df)
+    pd_feats  = cc_pd_history(spark, first_balance_lookup_dt, last_lookup_dt, acct_df)
+    st_feats  = cc_status_history(spark, first_balance_lookup_dt, last_lookup_dt, acct_df)
+
+    # Combine features
+    feat_df = reduce(
+        lambda left, right: left.join(right, "account_num", "left"),
+        [bal_feats, pd_feats, st_feats]
+    )
+    return feat_df
 ```
 
 
