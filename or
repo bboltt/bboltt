@@ -217,6 +217,44 @@ def cc_status_history(
     )
 
 
+```python
+# credit_card_features.py
+from pyspark.sql import SparkSession, DataFrame, functions as F
+from typing import Optional, List
+from functools import reduce
+from fraud_origination.customer_score.cs_v2.data_dev.features.training_data_utils import get_pop_accounts
+
+
+def cc_balance_history(
+    spark: SparkSession,
+    first_date: str,
+    last_date: str,
+    acct_df: Optional[DataFrame] = None
+) -> DataFrame:
+    # ... same as before: account-level aggregates from AM02
+    pass
+
+
+def cc_pd_history(
+    spark: SparkSession,
+    first_date: str,
+    last_date: str,
+    acct_df: Optional[DataFrame] = None
+) -> DataFrame:
+    # ... same as before: account-level aggregates from AM04
+    pass
+
+
+def cc_status_history(
+    spark: SparkSession,
+    first_date: str,
+    last_date: str,
+    acct_df: Optional[DataFrame] = None
+) -> DataFrame:
+    # ... same as before: account-level aggregates from AM00
+    pass
+
+
 def get_cc_features(
     spark: SparkSession,
     first_balance_lookup_dt: str,
@@ -225,12 +263,23 @@ def get_cc_features(
     first_rcif_lookup_dt: Optional[str] = None
 ) -> DataFrame:
     """
-    Combine balance, past-due and status features for all credit-card accounts in pop_df.
-    Determines acct_df from pop_df (or via SSN-based RCIF lookup), normalizes account_num for joins,
-    then calls cc_balance_history, cc_pd_history, cc_status_history with that acct_df.
+    Produce SSN-level credit-card features by:
+      1. deriving acct_df from pop_df or RCIF
+      2. normalizing account_num for CC products
+      3. computing account-level features via history functions
+      4. left-joining acct_df to each feature set to retain all accounts
+      5. aggregating per SSN with custom logic
     """
-    # Determine the set of accounts to use
-    if "account_num" not in pop_df.columns:
+    # 1. identify SSN column
+    if 'customerssn_obfuscated' in pop_df.columns:
+        ssn_col = 'customerssn_obfuscated'
+    elif 'customerssn' in pop_df.columns:
+        ssn_col = 'customerssn'
+    else:
+        ssn_col = 'account_num'
+
+    # 2. derive acct_df
+    if 'account_num' not in pop_df.columns:
         acct_df = get_pop_accounts(
             spark,
             first_lookup_dt=first_rcif_lookup_dt,
@@ -240,7 +289,7 @@ def get_cc_features(
     else:
         acct_df = pop_df
 
-    # Filter and normalize acct_df for CC products, extracting last 9 digits as bigint
+    # normalize and filter for credit-card accounts
     acct_df = (
         acct_df
         .filter(F.col("prodcode") == "CC")
@@ -249,19 +298,61 @@ def get_cc_features(
             "account_num",
             F.substring(F.col("account_num"), -9, 9).cast("bigint")
         )
+        .select(ssn_col, "account_num")
     )
 
-    # Generate feature sets
+    # 3. compute account-level features
     bal_feats = cc_balance_history(spark, first_balance_lookup_dt, last_lookup_dt, acct_df)
     pd_feats  = cc_pd_history(spark, first_balance_lookup_dt, last_lookup_dt, acct_df)
     st_feats  = cc_status_history(spark, first_balance_lookup_dt, last_lookup_dt, acct_df)
 
-    # Combine features
-    feat_df = reduce(
-        lambda left, right: left.join(right, "account_num", "left"),
-        [bal_feats, pd_feats, st_feats]
+    # 4. merge features to acct_df via left joins to keep all accounts
+    acct_feat_df = (
+        acct_df
+        .join(bal_feats, on="account_num", how="left")
+        .join(pd_feats,  on="account_num", how="left")
+        .join(st_feats,  on="account_num", how="left")
     )
-    return feat_df
+
+    # 5. aggregate to SSN level
+    sum_features: List[str] = [
+        'cc_bal_current_max', 'cc_bal_prev_max', 'cc_bal_high_ltd_max',
+        'cc_latefee_count', 'cc_overlimit_event_count', 'cc_nsf_count',
+        'cc_ptp_broken_count', 'cc_ptp_kept_count', 'cc_ptp_partial_count'
+    ]
+    max_features: List[str] = [
+        'cc_last_nsf_amt', 'cc_ptp_broken_amt', 'cc_ptp_kept_amt', 'cc_ptp_partial_amt',
+        'cc_months_min_pay_max', 'cc_amt_most_recent_pd', 'cc_bal_high_pd_max', 'cc_cons_pd_days_max'
+    ]
+    recency_features: List[str] = [
+        'cc_days_since_potential_chargeoff', 'cc_days_since_chargeoff_reinstated',
+        'cc_days_since_first_use', 'cc_days_since_last_nsf', 'cc_days_since_last_paid',
+        'cc_days_since_last_payment', 'cc_days_since_last_pd', 'cc_days_since_high_bal_pd',
+        'cc_days_since_fraud_flag', 'cc_days_since_security_flag'
+    ]
+    flag_features = [
+        'cc_past_due_flag', 'cc_overlimit_flag', 'cc_fraud_flag',
+        'cc_potential_chargeoff_flag', 'cc_highly_active_flag', 'cc_ever_active_flag'
+    ]
+
+    agg_exprs = []
+    for c in sum_features:
+        agg_exprs.append(F.sum(c).alias(c))
+    for c in max_features:
+        agg_exprs.append(F.max(c).alias(c))
+    for c in recency_features:
+        agg_exprs.append(F.min(c).alias(c))
+    for c in flag_features:
+        agg_exprs.append(F.max(c).alias(c))
+    agg_exprs.append(F.max('cc_vip_level').alias('cc_vip_level'))
+
+    return (
+        acct_feat_df
+        .groupBy(ssn_col)
+        .agg(*agg_exprs)
+    )
+```
+
 ```
 
 
