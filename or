@@ -1,3 +1,166 @@
+########## rcif.py changes ##########
+
+# … after you call get_rcif_acct_dts(…) …
+data = get_rcif_acct_dts(spark, lookup_dt, ssn_df)
+
+# split prodcode into consumer vs. commercial buckets
+data = data.withColumn(
+    "prodcode",
+    F.when((F.col("prodcode") == "DA") & (F.col("acct_business_flag") == "1"), "DA_comm")
+     .when((F.col("prodcode") == "DA") & (F.col("acct_business_flag") != "1"), "DA_cons")
+     .when((F.col("prodcode") == "TD") & (F.col("acct_business_flag") == "1"), "TD_comm")
+     .when((F.col("prodcode") == "TD") & (F.col("acct_business_flag") != "1"), "TD_cons")
+     .when((F.col("prodcode") == "TI") & (F.col("acct_business_flag") == "1"), "TI_comm")
+     .when((F.col("prodcode") == "TI") & (F.col("acct_business_flag") != "1"), "TI_cons")
+     .when(
+         (F.col("prodcode") == "CC") &
+         (F.substring(F.col("account_num"), 1, 7) == "0000022"),
+         "CC_comm"
+     )
+     .when(
+         (F.col("prodcode") == "CC") &
+         (F.substring(F.col("account_num"), 1, 7) == "0000011"),
+         "CC_cons"
+     )
+     .otherwise(F.col("prodcode"))
+)
+
+# … then continue building pop_accts from this edited `data` …
+
+
+
+########## balance.py changes ##########
+
+def dm_acct_history(
+    spark: SparkSession,
+    first_date: str,
+    last_date: str,
+    acct_df: Optional[DataFrame] = None
+) -> DataFrame:
+    """
+    One‑pass union of deposit, savings & time‑investment histories,
+    tag each with account_type, join to SSN, then aggregate three families.
+    """
+    # load & tag each history exactly once
+    dep = _load_hist("s11_dm.dfs002_dm14dd_ddssav_h", first_date, last_date, acct_df) \
+             .withColumn("account_type", F.lit("deposit"))
+    sav = _load_hist("s11_dm.dfs002_dm14dd_ddssav_h", first_date, last_date, acct_df) \
+             .withColumn("account_type", F.lit("savings"))
+    ti  = _load_hist("s11_tm.tms002_tm14dd_tmassmat_h", first_date, last_date, acct_df) \
+             .withColumn("account_type", F.lit("time_investment"))
+
+    uni = dep.union(sav).union(ti)
+
+    # join back to SSN
+    ssn_col = "customerssn_obfuscated" if "customerssn_obfuscated" in acct_df.columns \
+              else "customerssn" if "customerssn" in acct_df.columns \
+              else "account_num"
+    uni = uni.join(
+        acct_df.select(ssn_col, "account_num").distinct(),
+        on="account_num", how="inner"
+    )
+
+    # one loop to produce sum/avg/max per family per interval
+    from functools import reduce
+    aggregates = []
+    for days in sorted(intervals, reverse=True):
+        start = (datetime.strptime(last_date, "%Y-%m-%d") - timedelta(days=days))\
+                    .strftime("%Y-%m-%d")
+        window_df = uni.filter(F.col("ods_business_dt").between(start, last_date))
+
+        agg = (
+            window_df.groupBy(ssn_col)
+                     .agg(
+                        # deposit family
+                        F.sum(F.when(F.col("account_type")=="deposit", F.col("balance"))).alias(f"sum_dep_{days}d"),
+                        F.avg(F.when(F.col("account_type")=="deposit", F.col("balance"))).alias(f"avg_dep_{days}d"),
+                        F.max(F.when(F.col("account_type")=="deposit", F.col("balance"))).alias(f"max_dep_{days}d"),
+
+                        # savings family
+                        F.sum(F.when(F.col("account_type")=="savings", F.col("balance"))).alias(f"sum_sav_{days}d"),
+                        F.avg(F.when(F.col("account_type")=="savings", F.col("balance"))).alias(f"avg_sav_{days}d"),
+                        F.max(F.when(F.col("account_type")=="savings", F.col("balance"))).alias(f"max_sav_{days}d"),
+
+                        # time‑investment family
+                        F.sum(F.when(F.col("account_type")=="time_investment", F.col("balance"))).alias(f"sum_ti_{days}d"),
+                        F.avg(F.when(F.col("account_type")=="time_investment", F.col("balance"))).alias(f"avg_ti_{days}d"),
+                        F.max(F.when(F.col("account_type")=="time_investment", F.col("balance"))).alias(f"max_ti_{days}d"),
+                     )
+        )
+        aggregates.append(agg)
+
+    # stitch all intervals together
+    return reduce(lambda a, b: a.join(b, ssn_col, "left"), aggregates)
+
+
+########## transactions.py changes ##########
+
+def acct_transaction_history(
+    spark: SparkSession,
+    lookup_dt: str,
+    intervals: List[int],
+    pop_accts: Optional[DataFrame] = None
+) -> DataFrame:
+    """
+    Single scan of dm_transactions, tag DA_cons/TD_cons, join to SSN,
+    then two‑family counts & sums per interval.
+    """
+    max_days = max(intervals)
+    start_dt = (datetime.strptime(lookup_dt, "%Y-%m-%d") - timedelta(days=max_days))\
+                  .strftime("%Y-%m-%d")
+
+    df = (
+        spark.table("s11_dm.dmodst81_dm14dd_ddostran_h")
+             .filter(F.col("ods_business_dt").between(start_dt, lookup_dt))
+             .join(pop_accts.select("account_num").distinct(), "account_num", "inner")
+             .select("account_num", "ods_business_dt", "ods_tramt", "ods_trtype")
+    )
+
+    # tag only consumer DA and TD transactions
+    df = df.withColumn(
+        "trans_type",
+        F.when(F.col("ods_trtype").isin(  /* your DA codes list */  ), "DA_cons")
+         .when(F.col("ods_trtype").isin(  /* your TD codes list */  ), "TD_cons")
+         .otherwise(None)
+    ).filter(F.col("trans_type").isNotNull())
+
+    # join back to SSN
+    ssn_col = "customerssn_obfuscated" if "customerssn_obfuscated" in pop_accts.columns \
+              else "customerssn"
+    df = df.join(
+        pop_accts.select(ssn_col, "account_num").distinct(),
+        on="account_num", how="inner"
+    )
+
+    # loop intervals for two-family agg
+    from functools import reduce
+    results = []
+    for days in sorted(intervals, reverse=True):
+        start = (datetime.strptime(lookup_dt, "%Y-%m-%d") - timedelta(days=days))\
+                    .strftime("%Y-%m-%d")
+        w = df.filter(F.col("ods_business_dt").between(start, lookup_dt))
+
+        agg = (
+            w.groupBy(ssn_col)
+             .agg(
+                # DA_cons
+                F.count(F.when(F.col("trans_type")=="DA_cons", 1)).alias(f"cnt_DA_cons_{days}d"),
+                F.sum  (F.when(F.col("trans_type")=="DA_cons", F.col("ods_tramt"))).alias(f"sum_DA_cons_{days}d"),
+                # TD_cons
+                F.count(F.when(F.col("trans_type")=="TD_cons", 1)).alias(f"cnt_TD_cons_{days}d"),
+                F.sum  (F.when(F.col("trans_type")=="TD_cons", F.col("ods_tramt"))).alias(f"sum_TD_cons_{days}d"),
+             )
+        )
+        results.append(agg)
+
+    return reduce(lambda a, b: a.join(b, ssn_col, "left"), results)
+
+
+
+
+
+
+
 ```python
 # credit_card_features.py
 from pyspark.sql import SparkSession, DataFrame, functions as F
