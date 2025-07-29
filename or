@@ -31,6 +31,39 @@ data = data.withColumn(
 
 ########## balance.py changes ##########
 
+def _load_hist(
+    spark: SparkSession,
+    table_name: str,
+    first_date: str,
+    last_date: str,
+    acct_df: Optional[DataFrame]
+) -> DataFrame:
+    """
+    Reads table_name between the two dates, selects account_num, balance, ods_business_dt,
+    and (if acct_df is given) inner-joins to that list of accounts.
+    """
+    df = (
+      spark.table(table_name)
+           .filter(F.col("ods_business_dt").between(first_date, last_date))
+           .select(
+               F.col("dsm_account").alias("account_num"),
+               # tweak this to the right balance column for each table
+               F.col("dsm_balcur").alias("balance"),
+               F.col("ods_business_dt")
+           )
+    )
+    if acct_df is not None and "account_num" in acct_df.columns:
+        df = df.join(
+            acct_df.select("account_num").distinct(),
+            on="account_num",
+            how="inner"
+        )
+    return df
+
+
+
+
+
 def dm_acct_history(
     spark: SparkSession,
     first_date: str,
