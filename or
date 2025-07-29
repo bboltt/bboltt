@@ -31,6 +31,112 @@ data = data.withColumn(
 
 ########## balance.py changes ##########
 
+from pyspark.sql import SparkSession, DataFrame, functions as F
+from datetime import datetime, timedelta
+from functools import reduce
+
+def get_balance_df(
+    spark: SparkSession,
+    ssn_to_acct_df: DataFrame,
+    lookup_dt: str,
+    intervals: List[int]
+) -> DataFrame:
+    """
+    One-pass into dfs002_dm14dd_ddssav_h to get both DA (deposit) and TD (savings),
+    plus your TI table, then emits sum/avg/max per family for each interval.
+    """
+    # determine SSN column
+    ssn_col = ("customerssn_obfuscated" if "customerssn_obfuscated" in ssn_to_acct_df.columns
+               else "customerssn" if "customerssn" in ssn_to_acct_df.columns
+               else "account_num")
+
+    # 1) load DA/TD history once
+    max_days = max(intervals)
+    start_dt = (datetime.strptime(lookup_dt, "%Y-%m-%d") - timedelta(days=max_days))\
+                  .strftime("%Y-%m-%d")
+
+    df_ds = (
+        spark.table("s11_dm.dfs002_dm14dd_ddssav_h")
+             .filter(F.col("ods_business_dt").between(start_dt, lookup_dt))
+             .filter(F.col("prodcode").isin("DA", "TD"))
+             .select(
+                 F.col("dsm_account").alias("account_num"),
+                 F.col("dsm_balcur"  ).alias("balance"),
+                 F.col("ods_business_dt"),
+                 F.col("prodcode")
+             )
+             .join(
+                 ssn_to_acct_df.select(ssn_col, "account_num").distinct(),
+                 on="account_num", how="inner"
+             )
+    )
+
+    # 2) split into deposit vs savings
+    dep = df_ds.filter(F.col("prodcode") == "DA") \
+               .withColumn("account_type", F.lit("deposit"))
+    sav = df_ds.filter(F.col("prodcode") == "TD") \
+               .withColumn("account_type", F.lit("savings"))
+
+    # 3) load time-investment history (replace this with your real TI loader)
+    ti = (
+        spark.table("s11_tm.tms002_tm14dd_tmassmat_h")
+             .filter(F.col("ods_business_dt").between(start_dt, lookup_dt))
+             .select(
+                 F.col("tma_account").alias("account_num"),
+                 F.col("tma_balamt"  ).alias("balance"),
+                 F.col("ods_business_dt")
+             )
+             .join(
+                 ssn_to_acct_df.select(ssn_col, "account_num").distinct(),
+                 on="account_num", how="inner"
+             )
+             .withColumn("account_type", F.lit("time_investment"))
+    )
+
+    # 4) union all three
+    uni = dep.union(sav).union(ti)
+
+    # 5) for each interval compute sum/avg/max per family
+    aggs = []
+    for days in sorted(intervals, reverse=True):
+        window_start = (datetime.strptime(lookup_dt, "%Y-%m-%d") - timedelta(days=days))\
+                           .strftime("%Y-%m-%d")
+        w = uni.filter(F.col("ods_business_dt").between(window_start, lookup_dt))
+
+        aggs.append(
+            w.groupBy(ssn_col).agg(
+                # deposit family
+                F.sum(F.when(F.col("account_type")=="deposit", F.col("balance"))).alias(f"sum_dep_{days}d"),
+                F.avg(F.when(F.col("account_type")=="deposit", F.col("balance"))).alias(f"avg_dep_{days}d"),
+                F.max(F.when(F.col("account_type")=="deposit", F.col("balance"))).alias(f"max_dep_{days}d"),
+                # savings family
+                F.sum(F.when(F.col("account_type")=="savings", F.col("balance"))).alias(f"sum_sav_{days}d"),
+                F.avg(F.when(F.col("account_type")=="savings", F.col("balance"))).alias(f"avg_sav_{days}d"),
+                F.max(F.when(F.col("account_type")=="savings", F.col("balance"))).alias(f"max_sav_{days}d"),
+                # time-investment family
+                F.sum(F.when(F.col("account_type")=="time_investment", F.col("balance"))).alias(f"sum_ti_{days}d"),
+                F.avg(F.when(F.col("account_type")=="time_investment", F.col("balance"))).alias(f"avg_ti_{days}d"),
+                F.max(F.when(F.col("account_type")=="time_investment", F.col("balance"))).alias(f"max_ti_{days}d"),
+            )
+        )
+
+    # 6) stitch all interval DataFrames back together
+    return reduce(lambda a, b: a.join(b, ssn_col, "left"), aggs)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 def _load_hist(
     spark: SparkSession,
     table_name: str,
