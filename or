@@ -124,58 +124,102 @@ def get_balance_features(
     spark: SparkSession,
     ssn_to_acct_df: DataFrame,
     lookup_dt: str,
-    intervals: List[int]
+    intervals: List[int],
+    # num_months_for_monthly: int,
+    bal_hist_df: Union[DataFrame,None]=None,
 ) -> DataFrame:
     """
-    Builds SSN‑level balance features:
-      - Calls get_balance_history once
-      - For each interval N, computes sum/avg/max of `balance` for each family
+    Looks back X days at account balances and counts how many days it was negative for.
+    Returns account-level table.
     """
-    # 1. compute the earliest date we need
-    max_days = max(intervals)
-    first_date = (datetime.strptime(lookup_dt, "%Y-%m-%d") - timedelta(days=max_days))\
-                    .strftime("%Y-%m-%d")
+    # identify column to aggregate over: account or ssn level
+    if 'customerssn_obfuscated' in ssn_to_acct_df.columns:
+        ssn_col = 'customerssn_obfuscated'
+    elif 'customerssn' in ssn_to_acct_df.columns:
+        ssn_col = 'customerssn'
 
-    # 2. load the history (DA/TD + TI tagged by family)
-    hist = get_balance_history(spark, first_date, lookup_dt, ssn_to_acct_df)
+    first_date = (
+        datetime.strptime(lookup_dt, '%Y-%m-%d')
+        - timedelta(days=max(intervals))
+    ).strftime('%Y-%m-%d')
 
-    # 3. walk through intervals and build one DataFrame per window
-    ssn_col = 'customerssn_obfuscated' if 'customerssn_obfuscated' in ssn_to_acct_df.columns else 'customerssn'
-    slices = []
-    for days in sorted(intervals, reverse=True):
-        start = (datetime.strptime(lookup_dt, "%Y-%m-%d") - timedelta(days=days))\
-                    .strftime("%Y-%m-%d")
-
-        w = hist.filter(F.col("ods_business_dt").between(start, lookup_dt))
-
-        agg = (
-            w.groupBy(ssn_col)
-             .agg(
-                # deposit_cons
-                F.sum(F.when(F.col("family")=="deposit_cons", F.col("balance"))).alias(f"sum_dep_cons_{days}d"),
-                F.avg(F.when(F.col("family")=="deposit_cons", F.col("balance"))).alias(f"avg_dep_cons_{days}d"),
-                F.max(F.when(F.col("family")=="deposit_cons", F.col("balance"))).alias(f"max_dep_cons_{days}d"),
-
-                # deposit_comm
-                F.sum(F.when(F.col("family")=="deposit_comm", F.col("balance"))).alias(f"sum_dep_comm_{days}d"),
-                F.avg(F.when(F.col("family")=="deposit_comm", F.col("balance"))).alias(f"avg_dep_comm_{days}d"),
-                F.max(F.when(F.col("family")=="deposit_comm", F.col("balance"))).alias(f"max_dep_comm_{days}d"),
-
-                # ti_cons
-                F.sum(F.when(F.col("family")=="ti_cons", F.col("balance"))).alias(f"sum_ti_cons_{days}d"),
-                F.avg(F.when(F.col("family")=="ti_cons", F.col("balance"))).alias(f"avg_ti_cons_{days}d"),
-                F.max(F.when(F.col("family")=="ti_cons", F.col("balance"))).alias(f"max_ti_cons_{days}d"),
-
-                # ti_comm
-                F.sum(F.when(F.col("family")=="ti_comm", F.col("balance"))).alias(f"sum_ti_comm_{days}d"),
-                F.avg(F.when(F.col("family")=="ti_comm", F.col("balance"))).alias(f"avg_ti_comm_{days}d"),
-                F.max(F.when(F.col("family")=="ti_comm", F.col("balance"))).alias(f"max_ti_comm_{days}d"),
-             )
+    if not isinstance(bal_hist_df, DataFrame):
+        bal_hist = get_balance_df(
+            spark,
+            first_balance_lookup_dt=first_date,
+            last_lookup_dt=lookup_dt,
+            pop_df=ssn_to_acct_df,
         )
-        slices.append(agg)
+    else:
+        bal_hist = bal_hist_df.filter(
+            F.col('ods_business_dt').between(first_date, lookup_dt)
+        )
 
-    # 4. stitch them back into one SSN‑level wide table
-    return reduce(lambda a, b: a.join(b, ssn_col, "left"), slices)
+    feature_groups = []
+    intervals = sorted(intervals, reverse=True)
+    for interval in intervals:
+        interval_first_day = (
+            datetime.strptime(lookup_dt, '%Y-%m-%d')
+            - timedelta(days=interval)
+        ).strftime('%Y-%m-%d')
+
+        bal_tmp = (
+            bal_hist
+            .filter(F.col('ods_business_dt').between(interval_first_day, lookup_dt))
+            .groupBy(ssn_col)
+            .agg(
+                #####  RAW‐BALANCE STATS (kept here but **commented out** so you can reinstate later):
+                # F.first('balance_account_nums').alias(f'balance_account_nums_{interval}'),
+                # F.sum(   F.col('balance')   ).alias(f'raw_balance_sum_{interval}'),
+                # F.max(   F.col('balance')   ).alias(f'raw_balance_max_{interval}'),
+                # F.min(   F.col('balance')   ).alias(f'raw_balance_min_{interval}'),
+
+                ##### DERIVATIVE SIGNALS – deposit behavior only:
+                F.sum(
+                    F.when(F.col('aggregate_deposit_balance') < 0, 1)
+                     .otherwise(0)
+                ).alias(f'days_deposit_negative_{interval}'),
+
+                F.sum(
+                    F.when(F.col('num_deposit_accounts_overdraft') > 0, 1)
+                     .otherwise(0)
+                ).alias(f'days_any_deposit_negative_{interval}'),
+
+                F.sum(
+                    F.col('num_deposit_accounts_overdraft')
+                ).alias(f'account_days_deposit_negative_{interval}'),
+
+                F.max(
+                    F.col('num_deposit_accounts_overdraft')
+                ).alias(f'max_accounts_overdrawn_{interval}'),
+
+                ##### KEEP TI BALANCE AS BEFORE
+                # F.sum(F.col('aggregate_ti_balance')).alias(f'ti_balance_sum_{interval}')
+            )
+        )
+        feature_groups.append(bal_tmp)
+
+    # join all interval tables side by side
+    balance_features = reduce(
+        lambda a, b: a.join(b, on=[ssn_col], how="left"),
+        feature_groups
+    )
+
+    # bring in *current* TI balance at lookup_dt
+    ti_bal = (
+        bal_hist
+        .filter(F.col('ods_business_dt') == lookup_dt)
+        .groupBy(ssn_col)
+        .agg(
+            F.round(
+                F.sum(F.col("aggregate_ti_balance")), 2
+            ).alias('current_agg_ti_bal')
+        )
+    )
+    balance_features = balance_features.join(ti_bal, on=[ssn_col], how="left")
+
+    return balance_features
+
 
 
 
