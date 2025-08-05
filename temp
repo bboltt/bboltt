@@ -1,57 +1,33 @@
-Column Name	Description	Null Meaning
-sum_deposit_cons_xd	Total amount of consumer deposit over the past x days.	No transaction or balance history available for the time window.
-avg_deposit_cons_xd	Average amount of consumer deposit over the past x days.	No transaction or balance history available for the time window.
-max_deposit_cons_xd	Maximum single amount of consumer deposit over the past x days.	No transaction or balance history available for the time window.
-deposit_cons_bal_change_xd	Absolute change in balance for the feature over the past x days.	No transaction or balance history available for the time window.
-deposit_cons_bal_change_rate_xd	Rate of balance change for the feature over the past x days.	No transaction or balance history available for the time window.
-deposit_cons_bal_change_norm_xd	Normalized balance change for the feature over the past x days.	No transaction or balance history available for the time window.
-deposit_cons_bal_change_rate_norm_xd	Normalized rate of balance change for the feature over the past x days.	No transaction or balance history available for the time window.
-sum_deposit_comm_xd	Total amount of commercial deposit over the past x days.	No transaction or balance history available for the time window.
-avg_deposit_comm_xd	Average amount of commercial deposit over the past x days.	No transaction or balance history available for the time window.
-max_deposit_comm_xd	Maximum single amount of commercial deposit over the past x days.	No transaction or balance history available for the time window.
-deposit_comm_bal_change_xd	Absolute change in balance for the feature over the past x days.	No transaction or balance history available for the time window.
-deposit_comm_bal_change_rate_xd	Rate of balance change for the feature over the past x days.	No transaction or balance history available for the time window.
-deposit_comm_bal_change_norm_xd	Normalized balance change for the feature over the past x days.	No transaction or balance history available for the time window.
-deposit_comm_bal_change_rate_norm_xd	Normalized rate of balance change for the feature over the past x days.	No transaction or balance history available for the time window.
-sum_ti_cons_xd	Total amount of consumer time investment over the past x days.	No transaction or balance history available for the time window.
-avg_ti_cons_xd	Average amount of consumer time investment over the past x days.	No transaction or balance history available for the time window.
-max_ti_cons_xd	Maximum single amount of consumer time investment over the past x days.	No transaction or balance history available for the time window.
-ti_cons_bal_change_xd	Absolute change in balance for the feature over the past x days.	No transaction or balance history available for the time window.
-ti_cons_bal_change_rate_xd	Rate of balance change for the feature over the past x days.	No transaction or balance history available for the time window.
-ti_cons_bal_change_norm_xd	Normalized balance change for the feature over the past x days.	No transaction or balance history available for the time window.
-ti_cons_bal_change_rate_norm_xd	Normalized rate of balance change for the feature over the past x days.	No transaction or balance history available for the time window.
-sum_ti_comm_xd	Total amount of commercial time investment over the past x days.	No transaction or balance history available for the time window.
-avg_ti_comm_xd	Average amount of commercial time investment over the past x days.	No transaction or balance history available for the time window.
-max_ti_comm_xd	Maximum single amount of commercial time investment over the past x days.	No transaction or balance history available for the time window.
-ti_comm_bal_change_xd	Absolute change in balance for the feature over the past x days.	No transaction or balance history available for the time window.
-ti_comm_bal_change_rate_xd	Rate of balance change for the feature over the past x days.	No transaction or balance history available for the time window.
-ti_comm_bal_change_norm_xd	Normalized balance change for the feature over the past x days.	No transaction or balance history available for the time window.
-ti_comm_bal_change_rate_norm_xd	Normalized rate of balance change for the feature over the past x days.	No transaction or balance history available for the time window.
-sum_deposit_all_xd	Total amount of all deposits over the past x days.	No transaction or balance history available for the time window.
-avg_deposit_all_xd	Average amount of all deposits over the past x days.	No transaction or balance history available for the time window.
-max_deposit_all_xd	Maximum single amount of all deposits over the past x days.	No transaction or balance history available for the time window.
-deposit_all_bal_change_xd	Absolute change in balance for the feature over the past x days.	No transaction or balance history available for the time window.
-deposit_all_bal_change_rate_xd	Rate of balance change for the feature over the past x days.	No transaction or balance history available for the time window.
-deposit_all_bal_change_norm_xd	Normalized balance change for the feature over the past x days.	No transaction or balance history available for the time window.
-deposit_all_bal_change_rate_norm_xd	Normalized rate of balance change for the feature over the past x days.	No transaction or balance history available for the time window.
-sum_ti_all_xd	Total amount of all time investment over the past x days.	No transaction or balance history available for the time window.
-avg_ti_all_xd	Average amount of all time investment over the past x days.	No transaction or balance history available for the time window.
-max_ti_all_xd	Maximum single amount of all time investment over the past x days.	No transaction or balance history available for the time window.
-ti_all_bal_change_xd	Absolute change in balance for the feature over the past x days.	No transaction or balance history available for the time window.
-ti_all_bal_change_rate_xd	Rate of balance change for the feature over the past x days.	No transaction or balance history available for the time window.
-ti_all_bal_change_norm_xd	Normalized balance change for the feature over the past x days.	No transaction or balance history available for the time window.
-ti_all_bal_change_rate_norm_xd	Normalized rate of balance change for the feature over the past x days.	No transaction or balance history available for the time window.
-deposit_cons_negative_xd	Total negative value of consumer deposit over the past x days.	No transaction or balance history available for the time window.
-account_days_deposit_cons_negative_xd	Number of account-days with negative consumer deposit over the past x days.	No transaction or balance history available for the time window.
-max_deposit_cons_accounts_overdrawn_xd	Maximum overdrawn accounts for consumer deposit over the past x days.	No transaction or balance history available for the time window.
-deposit_cons_coeff_var_xd	Coefficient of variation for consumer deposit over the past x days.	No transaction or balance history available for the time window.
-deposit_cons_skewness_xd	Skewness of consumer deposit over the past x days.	No transaction or balance history available for the time window.
-deposit_cons_kurtosis_xd	Kurtosis of consumer deposit over the past x days.	No transaction or balance history available for the time window.
-days_deposit_comm_negative_xd	Number of days with negative commercial deposit over the past x days.	No transaction or balance history available for the time window.
-account_days_deposit_comm_accounts_overdrawn_xd	Number of account-days with negative commercial deposit over the past x days.	No transaction or balance history available for the time window.
-deposit_comm_coeff_var_xd	Coefficient of variation for commercial deposit over the past x days.	No transaction or balance history available for the time window.
-deposit_comm_skewness_xd	Skewness of commercial deposit over the past x days.	No transaction or balance history available for the time window.
-deposit_comm_kurtosis_xd	Kurtosis of commercial deposit over the past x days.	No transaction or balance history available for the time window.
-deposit_all_negative_xd	Total negative value of all deposits over the past x days.	No transaction or balance history available for the time window.
-account_days_deposit_all_negative_xd	Number of account-days with negative deposits over the past x days.	No transaction or balance history available for the time window.
-max_deposit_all_accounts_overdrawn_xd	Maximum overdrawn accounts for all deposits over the past x days.	No transaction or balance history available for the time window.
+Feature Name	Description
+cc_bal_current_max	Maximum current balance recorded on credit card.
+cc_bal_prev_max	Maximum previous balance recorded before current period.
+cc_bal_high_ltd_max	Maximum historical balance as a percentage of credit limit.
+cc_latefee_count	Total number of late fees incurred.
+cc_overlimit_event_count	Number of times the account went over its credit limit.
+cc_nsf_count	Number of returned payments due to insufficient funds (NSF).
+cc_ptp_broken_count	Count of broken promises to pay.
+cc_ptp_kept_count	Count of fulfilled promises to pay.
+cc_ptp_partial_count	Count of partially fulfilled promises to pay.
+cc_last_nsf_amt	Amount of the most recent NSF event.
+cc_ptp_broken_amt	Total amount associated with broken promises to pay.
+cc_ptp_kept_amt	Total amount associated with kept promises to pay.
+cc_ptp_partial_amt	Total amount associated with partially kept promises to pay.
+cc_months_min_pay_max	Maximum number of months where only the minimum payment was made.
+cc_amt_most_recent_pd	Amount paid in the most recent payment.
+cc_bal_high_pd_max	Highest balance ever recorded during a payment cycle.
+cc_cons_pd_days_max	Maximum number of consecutive past-due days.
+cc_days_since_chargeoff_reinstated	Days since the charge-off was reinstated (reversed).
+cc_days_since_first_use	Days since the credit card was first used.
+cc_days_since_nsf	Days since the last NSF event.
+cc_days_since_last_paid	Days since any amount was last paid.
+cc_days_since_last_payment	Days since the last full payment.
+cc_days_since_last_pd	Days since the last past-due occurrence.
+cc_days_since_high_bal_pd	Days since the highest past-due balance was observed.
+cc_days_since_fraud_flag	Days since the card was flagged for fraud.
+cc_days_since_security_flag	Days since a security issue was flagged on the card.
+cc_past_due_flag	Indicator flag for past-due status.
+cc_overlimit_flag	Indicator flag for being over the credit limit.
+cc_fraud_flag	Indicator flag for suspected or confirmed fraud on the account.
+cc_ever_active_flag	Flag indicating if the card was ever used or active.
+cc_vip_level	VIP classification level of the cardholder.
+lookup_dt	The reference date used to compute the features.
