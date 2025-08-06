@@ -2,20 +2,24 @@ from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from typing import List
 
-def get_fraud_labels_by_app_date(
+from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import functions as F
+
+def get_fraud_labels_by_app_date_v2(
     spark: SparkSession,
     pop_df: DataFrame,
-    intervals: List[int],
     label_window_days: int = 180,
 ) -> DataFrame:
     """
-    Label applications with fraud using all known fraud events, based on SSN and application date.
-    pop_df must contain:
+    Label each application with fraud_flag = 1 if fraud occurred within X days after applicationdate.
+
+    pop_df must include:
+        - account_num
         - customerssn_obfuscated
-        - applicationdate (as 'app_date')
+        - applicationdate (as a date)
     """
 
-    # 1. Load fraud table and get (SSN, first_fraud_dt)
+    # Step 1: Load fraud accounts with flags
     fraud_flags = (
         spark.table("dm_fdp.fraudflagfinaldoa")
         .filter(
@@ -29,7 +33,7 @@ def get_fraud_labels_by_app_date(
         .withColumn("frauddate", F.col("frauddate").cast("date"))
     )
 
-    # 2. Map fraud accounts to SSNs via pop_df
+    # Step 2: Join to get SSN for each fraud account
     fraud_with_ssn = (
         fraud_flags.join(
             pop_df.select("account_num", "customerssn_obfuscated").dropna().distinct(),
@@ -40,7 +44,7 @@ def get_fraud_labels_by_app_date(
         .distinct()
     )
 
-    # 3. Create all (app, fraud) combinations by joining pop_df and fraud_with_ssn
+    # Step 3: Join fraud events to applications (SSN-based)
     app_fraud_pair = (
         pop_df
         .select("customerssn_obfuscated", "applicationdate")
@@ -54,24 +58,24 @@ def get_fraud_labels_by_app_date(
         .filter(F.col("days_diff").between(1, label_window_days))
     )
 
-    # 4. Assign fraud label for each interval
-    labeled_apps = pop_df.select("customerssn_obfuscated", "applicationdate").distinct()
-
-    for x in intervals:
-        labeled_subset = (
+    # Step 4: Assign fraud_flag = 1 if any match found, else 0
+    labeled = (
+        pop_df
+        .select("customerssn_obfuscated", "applicationdate")
+        .distinct()
+        .join(
             app_fraud_pair
-            .filter(F.col("days_diff") <= x)
-            .withColumn(f"fraud_label_{x}", F.lit(1))
-            .select("customerssn_obfuscated", "applicationdate", f"fraud_label_{x}")
+            .select("customerssn_obfuscated", "applicationdate")
+            .withColumn("fraud_flag", F.lit(1))
+            .distinct(),
+            on=["customerssn_obfuscated", "applicationdate"],
+            how="left"
         )
+        .withColumn("fraud_flag", F.coalesce(F.col("fraud_flag"), F.lit(0)))
+    )
 
-        labeled_apps = (
-            labeled_apps
-            .join(labeled_subset, on=["customerssn_obfuscated", "applicationdate"], how="left")
-            .withColumn(f"fraud_label_{x}", F.coalesce(f"fraud_label_{x}", F.lit(0)))
-        )
+    return labeled
 
-    return labeled_apps
 
 
 
