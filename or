@@ -2,22 +2,20 @@ from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from typing import List
 
-def get_label_from_dm_fdp_v2(
+def get_fraud_labels_by_app_date(
     spark: SparkSession,
     pop_df: DataFrame,
-    intervals: List[int],  # e.g., [30, 60, 90]
+    intervals: List[int],
+    label_window_days: int = 180,
 ) -> DataFrame:
     """
-    Generate fraud labels using dm_fdp.fraudflagfinaldoa, joined by account_num,
-    aggregated by SSN (customerssn_obfuscated), and labeled based on intervals from applicationdate.
-
+    Label applications with fraud using all known fraud events, based on SSN and application date.
     pop_df must contain:
-        - account_num (bigint)
         - customerssn_obfuscated
-        - applicationdate (date)
+        - applicationdate (as 'app_date')
     """
 
-    # Step 1: Load fraud cases with any source flag = 1
+    # 1. Load fraud table and get (SSN, first_fraud_dt)
     fraud_flags = (
         spark.table("dm_fdp.fraudflagfinaldoa")
         .filter(
@@ -27,60 +25,71 @@ def get_label_from_dm_fdp_v2(
             (F.col("nopostflag") == 1) |
             (F.col("returnsflag") == 1)
         )
-        .select(
-            F.col("account_num").cast("bigint").alias("account_num"),
-            F.col("frauddate").alias("first_fraud_dt")
+        .select("account_num", "frauddate")
+        .withColumn("frauddate", F.col("frauddate").cast("date"))
+    )
+
+    # 2. Map fraud accounts to SSNs via pop_df
+    fraud_with_ssn = (
+        fraud_flags.join(
+            pop_df.select("account_num", "customerssn_obfuscated").dropna().distinct(),
+            on="account_num",
+            how="inner"
         )
+        .select("customerssn_obfuscated", "frauddate")
+        .distinct()
     )
 
-    # Step 2: Join fraud flags to population
-    joined = pop_df.join(
-        fraud_flags,
-        on="account_num",
-        how="left"
-    )
-
-    # Step 3: Aggregate to SSN level (keep applicationdate)
-    labeled_df = (
-        joined
-        .groupBy("customerssn_obfuscated")
-        .agg(
-            F.min("first_fraud_dt").alias("first_fraud_dt"),
-            F.min("applicationdate").alias("applicationdate")
+    # 3. Create all (app, fraud) combinations by joining pop_df and fraud_with_ssn
+    app_fraud_pair = (
+        pop_df
+        .select("customerssn_obfuscated", "applicationdate")
+        .distinct()
+        .join(
+            fraud_with_ssn,
+            on="customerssn_obfuscated",
+            how="left"
         )
+        .withColumn("days_diff", F.datediff(F.col("frauddate"), F.col("applicationdate")))
+        .filter(F.col("days_diff").between(1, label_window_days))
     )
 
-    # Step 4: Add fraud_label_x for each interval
+    # 4. Assign fraud label for each interval
+    labeled_apps = pop_df.select("customerssn_obfuscated", "applicationdate").distinct()
+
     for x in intervals:
-        labeled_df = labeled_df.withColumn(
-            f"fraud_label_{x}",
-            F.when(
-                (F.col("first_fraud_dt").isNotNull()) &
-                (F.datediff(F.col("first_fraud_dt"), F.col("applicationdate")) <= x) &
-                (F.datediff(F.col("first_fraud_dt"), F.col("applicationdate")) > 0),
-                1
-            ).otherwise(0)
+        labeled_subset = (
+            app_fraud_pair
+            .filter(F.col("days_diff") <= x)
+            .withColumn(f"fraud_label_{x}", F.lit(1))
+            .select("customerssn_obfuscated", "applicationdate", f"fraud_label_{x}")
         )
 
-    return labeled_df
+        labeled_apps = (
+            labeled_apps
+            .join(labeled_subset, on=["customerssn_obfuscated", "applicationdate"], how="left")
+            .withColumn(f"fraud_label_{x}", F.coalesce(f"fraud_label_{x}", F.lit(0)))
+        )
+
+    return labeled_apps
 
 
 
 
 
-labels = get_label_from_dm_fdp_v2(
+
+labels = get_fraud_labels_by_app_date(
     spark=spark,
-    pop_df=lookup_dt_apps,
-    intervals=feature_cfg['target']['intervals']  # e.g., [30, 60, 90]
+    pop_df=lookup_dt_apps,  # must include account_num, customerssn_obfuscated, applicationdate
+    intervals=[30, 60, 90],
+    label_window_days=180
 )
 
 final_tbl = lookup_dt_apps.join(
-    labels.drop("applicationdate"),  # avoid duplicate if present
-    on="customerssn_obfuscated",
+    labels,
+    on=["customerssn_obfuscated", "applicationdate"],
     how="left"
 )
-
-
 
 
 
