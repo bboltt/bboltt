@@ -1,3 +1,100 @@
+from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import functions as F
+from typing import List
+
+def get_label_from_dm_fdp_v2(
+    spark: SparkSession,
+    pop_df: DataFrame,
+    intervals: List[int],  # e.g., [30, 60, 90]
+) -> DataFrame:
+    """
+    Generate fraud labels using dm_fdp.fraudflagfinaldoa, joined by account_num,
+    aggregated by SSN (customerssn_obfuscated), and labeled based on intervals from applicationdate.
+
+    pop_df must contain:
+        - account_num (bigint)
+        - customerssn_obfuscated
+        - applicationdate (date)
+    """
+
+    # Step 1: Load fraud cases with any source flag = 1
+    fraud_flags = (
+        spark.table("dm_fdp.fraudflagfinaldoa")
+        .filter(
+            (F.col("deticaconfirmedclosedflag") == 1) |
+            (F.col("corpsec_casesflag") == 1) |
+            (F.col("reclasspipelineflag") == 1) |
+            (F.col("nopostflag") == 1) |
+            (F.col("returnsflag") == 1)
+        )
+        .select(
+            F.col("account_num").cast("bigint").alias("account_num"),
+            F.col("frauddate").alias("first_fraud_dt")
+        )
+    )
+
+    # Step 2: Join fraud flags to population
+    joined = pop_df.join(
+        fraud_flags,
+        on="account_num",
+        how="left"
+    )
+
+    # Step 3: Aggregate to SSN level (keep applicationdate)
+    labeled_df = (
+        joined
+        .groupBy("customerssn_obfuscated")
+        .agg(
+            F.min("first_fraud_dt").alias("first_fraud_dt"),
+            F.min("applicationdate").alias("applicationdate")
+        )
+    )
+
+    # Step 4: Add fraud_label_x for each interval
+    for x in intervals:
+        labeled_df = labeled_df.withColumn(
+            f"fraud_label_{x}",
+            F.when(
+                (F.col("first_fraud_dt").isNotNull()) &
+                (F.datediff(F.col("first_fraud_dt"), F.col("applicationdate")) <= x) &
+                (F.datediff(F.col("first_fraud_dt"), F.col("applicationdate")) > 0),
+                1
+            ).otherwise(0)
+        )
+
+    return labeled_df
+
+
+
+
+
+labels = get_label_from_dm_fdp_v2(
+    spark=spark,
+    pop_df=lookup_dt_apps,
+    intervals=feature_cfg['target']['intervals']  # e.g., [30, 60, 90]
+)
+
+final_tbl = lookup_dt_apps.join(
+    labels.drop("applicationdate"),  # avoid duplicate if present
+    on="customerssn_obfuscated",
+    how="left"
+)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 ########## rcif.py changes ##########
 
 # … after you call get_rcif_acct_dts(…) …
