@@ -1,25 +1,48 @@
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
-from typing import List
+from datetime import datetime, timedelta
 
-from pyspark.sql import DataFrame, SparkSession
-from pyspark.sql import functions as F
-
-def get_fraud_labels_by_app_date_v2(
+def get_label_from_dm_fdp_v2(
     spark: SparkSession,
+    lookup_dt: str,
     pop_df: DataFrame,
     label_window_days: int = 180,
 ) -> DataFrame:
     """
-    Label each application with fraud_flag = 1 if fraud occurred within X days after applicationdate.
+    For each (customerssn_obfuscated, applicationdate), return the first fraud date
+    that occurs within `label_window_days` (default 180) AFTER the application date.
+    If none exists, the first_fraud_dt_180d will be NULL.
 
-    pop_df must include:
-        - account_num
-        - customerssn_obfuscated
-        - applicationdate (as a date)
+    pop_df must contain:
+      - customerssn_obfuscated
+      - applicationdate (date)
+      - account_num (bigint) OR datacollectionkey (we'll look up account_num if missing)
     """
 
-    # Step 1: Load fraud accounts with flags
+    # If account_num is not present, look it up via datacollectionkey (partition picked near lookup_dt)
+    if "account_num" not in pop_df.columns and "datacollectionkey" in pop_df.columns:
+        # if you already have get_closest_partition, keep using it; otherwise a straight read is fine
+        # date = get_closest_partition(spark, "dm_fdp.ff_account_lookup", lookup_dt, get_after_date=True)
+        lookup_tbl = (
+            spark.table("dm_fdp.ff_account_lookup")
+            # .filter(F.col("ods_business_dt") == date)  # uncomment if you need a specific partition
+            .select(
+                F.col("datacollectionkey"),
+                F.col("newaccountnumber").alias("account_num"),
+            )
+            .distinct()
+        )
+        pop_df = pop_df.join(lookup_tbl, on="datacollectionkey", how="left")
+
+    # Base set of unique SSN+app_date rows (enforce one row per SSN per day downstream)
+    base_apps = (
+        pop_df
+        .select("customerssn_obfuscated", "applicationdate", "account_num")
+        .dropna(subset=["customerssn_obfuscated", "applicationdate"])
+        .dropDuplicates(["customerssn_obfuscated", "applicationdate"])
+    )
+
+    # Load fraud accounts (any flag = 1) from the new table
     fraud_flags = (
         spark.table("dm_fdp.fraudflagfinaldoa")
         .filter(
@@ -29,52 +52,45 @@ def get_fraud_labels_by_app_date_v2(
             (F.col("nopostflag") == 1) |
             (F.col("returnsflag") == 1)
         )
-        .select("account_num", "frauddate")
-        .withColumn("frauddate", F.col("frauddate").cast("date"))
+        .select(
+            F.col("account_num").cast("bigint").alias("account_num"),
+            F.to_date(F.col("frauddate")).alias("frauddate"),
+        )
+        .distinct()
     )
 
-    # Step 2: Join to get SSN for each fraud account
+    # Map fraud events to SSNs using account_num from the population
     fraud_with_ssn = (
-        fraud_flags.join(
+        fraud_flags
+        .join(
             pop_df.select("account_num", "customerssn_obfuscated").dropna().distinct(),
             on="account_num",
-            how="inner"
+            how="inner",
         )
         .select("customerssn_obfuscated", "frauddate")
         .distinct()
     )
 
-    # Step 3: Join fraud events to applications (SSN-based)
-    app_fraud_pair = (
-        pop_df
+    # Pair each app with fraud events for the same SSN, keep those within (0, 180] days, and take the earliest
+    app_fraud_pairs = (
+        base_apps
         .select("customerssn_obfuscated", "applicationdate")
-        .distinct()
-        .join(
-            fraud_with_ssn,
-            on="customerssn_obfuscated",
-            how="left"
-        )
+        .join(fraud_with_ssn, on="customerssn_obfuscated", how="left")
         .withColumn("days_diff", F.datediff(F.col("frauddate"), F.col("applicationdate")))
-        .filter(F.col("days_diff").between(1, label_window_days))
+        .filter((F.col("days_diff") >= 1) & (F.col("days_diff") <= label_window_days))
+        .groupBy("customerssn_obfuscated", "applicationdate")
+        .agg(F.min("frauddate").alias("first_fraud_dt_180d"))
     )
 
-    # Step 4: Assign fraud_flag = 1 if any match found, else 0
-    labeled = (
-        pop_df
+    # Return one row per SSN+app_date with the first fraud date (NULL if none)
+    result = (
+        base_apps
         .select("customerssn_obfuscated", "applicationdate")
-        .distinct()
-        .join(
-            app_fraud_pair
-            .select("customerssn_obfuscated", "applicationdate")
-            .withColumn("fraud_flag", F.lit(1))
-            .distinct(),
-            on=["customerssn_obfuscated", "applicationdate"],
-            how="left"
-        )
-        .withColumn("fraud_flag", F.coalesce(F.col("fraud_flag"), F.lit(0)))
+        .join(app_fraud_pairs, on=["customerssn_obfuscated", "applicationdate"], how="left")
     )
 
-    return labeled
+    return result
+
 
 
 
