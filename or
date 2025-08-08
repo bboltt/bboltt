@@ -328,168 +328,172 @@ def get_balance_history(
 
 from functools import reduce
 
+from pyspark.sql import functions as F
+from pyspark.sql import DataFrame, SparkSession
+from typing import List, Union
+from datetime import datetime, timedelta
+from dateutil.relativedelta import relativedelta
+from functools import reduce
+
+from fraud_origination.customer_score.cs_v2.data_dev.features.training_data_utils import get_pop_accounts
+from fraud_origination.shared_utils.pipeline.utils import get_closest_partition
+
 def get_balance_features(
     spark: SparkSession,
     ssn_to_acct_df: DataFrame,
     lookup_dt: str,
-    intervals: List[int]
+    intervals: List[int],
 ) -> DataFrame:
     """
-    Builds SSN-level balance features over each interval N:
-      • For each deposit family (deposit_cons, deposit_comm, deposit_all):
-          – sum, avg, max of daily balances
-          – days_negative (# days total balance < 0)
-          – account_days_negative (sum of # overdrawn accounts each day)
-          – max_accounts_overdrawn (worst single‐day # overdrawn accts)
-          – coeff_var, skewness, kurtosis of daily total balance
-          – bal_change (last_day – first_day) and change_rate
-      • For each TI family (ti_cons, ti_comm, ti_all):
-          – sum, avg, max of daily balances
-          – bal_change and change_rate
+    Builds SSN-level balance features for deposit families over windows in `intervals`
+    ending at `lookup_dt`. TI families are excluded from the windowed loop and instead
+    produce only two features: current-day TI balance and a positive-flag.
     """
-    # 1) compute earliest date needed
+
+    # 1) Compute earliest date for history
     max_days = max(intervals)
     first_date = (
-        datetime.strptime(lookup_dt, "%Y-%m-%d")
+        datetime.strptime(lookup_dt, "%Y-%m-%d") 
         - timedelta(days=max_days)
     ).strftime("%Y-%m-%d")
 
-    # 2) load tagged history once
+    # 2) Load the full history (DA/TD + TI) tagged by family
     hist = get_balance_history(spark, first_date, lookup_dt, ssn_to_acct_df)
 
-    # 3) pick SSN col
-    ssn_col = (
-        "customerssn_obfuscated"
-        if "customerssn_obfuscated" in ssn_to_acct_df.columns
-        else "customerssn"
-    )
-
+    # 3) Family definitions
     deposit_fams = ['deposit_cons', 'deposit_comm']
-    ti_fams      = ['ti_cons',       'ti_comm']
-    all_fams     = deposit_fams        # only loop deposit families below
+    ti_fams      = ['ti_cons',     'ti_comm']
+    all_fams     = deposit_fams + ti_fams
 
-    # ── TI‐ONLY FEATURES ────────────────────────────────────────────────────
-    # compute TI current‐day balance and positive‐flag, to join in at the end
-    ti_features = (
-        pivoted
-        # pivoted already has ti_cons_bal and ti_comm_bal columns
-        .withColumn('ti_all_bal', 
-            F.coalesce(F.col('ti_cons_bal'), F.lit(0)) + 
-            F.coalesce(F.col('ti_comm_bal'), F.lit(0))
+    # decide SSN column
+    if 'customerssn_obfuscated' in ssn_to_acct_df.columns:
+        ssn_col = 'customerssn_obfuscated'
+    else:
+        ssn_col = 'customerssn'
+
+    # ────────────────────────────────────────────────────────────────────────────
+    # 4) TI-only features (current-day @ lookup_dt)
+    ti_features_df = (
+        hist
+        .filter(
+            F.col('family').isin(ti_fams) &
+            (F.col('ods_business_dt') == lookup_dt)
         )
-        .select(ssn_col, 'ods_business_dt', 'ti_all_bal')
-        .filter(F.col('ods_business_dt') == lookup_dt)
         .groupBy(ssn_col)
         .agg(
-            F.first('ti_all_bal', ignorenulls=True).alias('ti_all_bal'),
-            (F.first('ti_all_bal', ignorenulls=True) > 0).cast('int').alias('ti_all_positive_flag')
+            F.sum('balance').alias('ti_all_bal')
+        )
+        .withColumn(
+            'ti_all_positive_flag',
+            (F.col('ti_all_bal') > 0).cast('int')
         )
     )
-    # ────────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────────────
 
-    feature_frames = []
+    # 5) Build deposit-window features
+    balances_by_window = []
     for days in sorted(intervals, reverse=True):
         window_start = (
-            datetime.strptime(lookup_dt, "%Y-%m-%d")
+            datetime.strptime(lookup_dt, "%Y-%m-%d") 
             - timedelta(days=days)
         ).strftime("%Y-%m-%d")
 
-        # A) pivot daily into fam_bal and fam_od_accts columns
+        # 5a) Aggregate daily snapshot by family
         daily = (
             hist
-            .filter(F.col("ods_business_dt").between(window_start, lookup_dt))
-            .groupBy(ssn_col, "ods_business_dt", "family")
+            .filter(F.col('ods_business_dt').between(window_start, lookup_dt))
+            .groupBy(ssn_col, 'ods_business_dt', 'family')
             .agg(
-                F.sum("balance").alias("daily_bal"),
-                F.sum(F.when(F.col("balance") < 0, 1).otherwise(0))
-                 .alias("daily_od_accts")
+                F.sum('balance').alias('daily_bal'),
+                F.sum(F.when(F.col('balance') < 0, 1).otherwise(0)).alias('daily_od_accts')
             )
         )
 
+        # 5b) Pivot to wide: one column per family
         pivoted = (
             daily
-            .groupBy(ssn_col, "ods_business_dt")
-            .pivot("family", all_fams)
+            .groupBy(ssn_col, 'ods_business_dt')
+            .pivot('family', all_fams)
             .agg(
-                F.first("daily_bal").alias("bal"),
-                F.first("daily_od_accts").alias("od_accts")
+                F.first('daily_bal').alias('bal'),
+                F.first('daily_od_accts').alias('od_accts')
             )
             .select(
-                ssn_col, "ods_business_dt",
-                *[f"{fam}_bal"      for fam in all_fams],
-                *[f"{fam}_od_accts" for fam in deposit_fams]
+                ssn_col,
+                'ods_business_dt',
+                *[F.col(f"{fam}_bal")     for fam in all_fams],
+                *[F.col(f"{fam}_od_accts") for fam in deposit_fams]
             )
         )
 
-        # B) build aggregations for this window
-        exprs = []
-        for fam in all_fams:
-            # sum/avg/max of daily balances
-            exprs += [
-                F.sum(F.col(f"{fam}_bal")).alias(f"sum_{fam}_{days}d"),
-                F.avg(F.col(f"{fam}_bal")).alias(f"avg_{fam}_{days}d"),
-                F.max(F.col(f"{fam}_bal")).alias(f"max_{fam}_{days}d"),
-            ]
-
-            # derivative: last_day - first_day, and rate
-            exprs += [
-                (
-                    F.max(F.when(
-                        F.col("ods_business_dt") == lookup_dt,
-                        F.col(f"{fam}_bal")
-                    )) -
-                    F.max(F.when(
-                        F.col("ods_business_dt") == window_start,
-                        F.col(f"{fam}_bal")
-                    ))
-                ).alias(f"{fam}_bal_change_{days}d"),
-                (
-                    (
-                        F.max(F.when(
-                            F.col("ods_business_dt") == lookup_dt,
-                            F.col(f"{fam}_bal")
-                        )) -
-                        F.max(F.when(
-                            F.col("ods_business_dt") == window_start,
-                            F.col(f"{fam}_bal")
-                        ))
-                    ) / F.lit(days)
-                ).alias(f"{fam}_bal_change_rate_{days}d"),
-            ]
-
-        # C) deposit-only behavior signals
-        for fam in deposit_fams:
-            exprs += [
-                # days where total deposit balance < 0
-                F.sum(F.when(F.col(f"{fam}_bal") < 0, 1).otherwise(0))
-                 .alias(f"days_{fam}_negative_{days}d"),
-
-                # total account-days overdrawn
-                F.sum(F.col(f"{fam}_od_accts"))
-                 .alias(f"account_days_{fam}_negative_{days}d"),
-
-                # worst-day # accounts overdrawn
-                F.max(F.col(f"{fam}_od_accts"))
-                 .alias(f"max_{fam}_accounts_overdrawn_{days}d"),
-
-                # distribution of daily balances
-                (F.stddev(F.col(f"{fam}_bal"))/F.avg(F.col(f"{fam}_bal")))
-                 .alias(f"{fam}_coeff_var_{days}d"),
-                F.skewness(F.col(f"{fam}_bal"))
-                 .alias(f"{fam}_skewness_{days}d"),
-                F.kurtosis(F.col(f"{fam}_bal"))
-                 .alias(f"{fam}_kurtosis_{days}d"),
-            ]
-
-        feature_frames.append(
-            pivoted.groupBy(ssn_col).agg(*exprs)
+        # 5c) Coalesce the “all” families
+        pivoted = (
+            pivoted
+            .withColumn(
+                'deposit_all_bal',
+                F.coalesce(F.col('deposit_cons_bal'), F.lit(0)) +
+                F.coalesce(F.col('deposit_comm_bal'), F.lit(0))
+            )
+            .withColumn(
+                'deposit_all_od_accts',
+                F.coalesce(F.col('deposit_cons_od_accts'), F.lit(0)) +
+                F.coalesce(F.col('deposit_comm_od_accts'), F.lit(0))
+            )
         )
 
-    # 4) stitch windows side-by-side
-    return reduce(
-        lambda left, right: left.join(right, on=[ssn_col], how="left"),
-        feature_frames
+        # 5d) Build exprs for deposit families + deposit_all
+        exprs = []
+        for fam in deposit_fams + ['deposit_all']:
+            fam_bal = F.col(f"{fam}_bal")
+
+            # endpoints
+            last_day  = F.first(F.when(F.col('ods_business_dt') == lookup_dt, fam_bal), ignorenulls=True)
+            first_day = F.first(F.when(F.col('ods_business_dt') == window_start, fam_bal), ignorenulls=True)
+
+            # sum/avg/max/min
+            exprs += [
+                F.sum(fam_bal).alias(f"sum_{fam}_{days}d"),
+                F.avg(fam_bal).alias(f"avg_{fam}_{days}d"),
+                F.max(fam_bal).alias(f"max_{fam}_{days}d"),
+                F.min(fam_bal).alias(f"min_{fam}_{days}d"),
+            ]
+
+            # endpoints as features
+            exprs += [
+                last_day.alias(f"{fam}_bal_last_day_{days}d"),
+                first_day.alias(f"{fam}_bal_first_day_{days}d"),
+            ]
+
+            # absolute & per-day change
+            exprs += [
+                (last_day - first_day).alias(f"{fam}_bal_change_{days}d"),
+                ((last_day - first_day) / F.lit(days)).alias(f"{fam}_bal_change_rate_{days}d"),
+            ]
+
+            # normalized by range = max - min (safe, zero when flat)
+            exprs += [
+                F.when(
+                    (F.max(fam_bal) - F.min(fam_bal)) > 0,
+                    (last_day - first_day) / (F.max(fam_bal) - F.min(fam_bal))
+                )
+                .otherwise(F.lit(0.0))
+                .alias(f"{fam}_bal_change_rate_norm_{days}d"),
+            ]
+
+        # 5e) Aggregate at SSN level for this window
+        win_feat = pivoted.groupBy(ssn_col).agg(*exprs)
+        balances_by_window.append(win_feat)
+
+    # 6) Join all windows together
+    balances = reduce(
+        lambda left, right: left.join(right, on=ssn_col, how='left'),
+        balances_by_window
     )
+
+    # 7) Finally, attach the TI features
+    balances = balances.join(ti_features_df, on=ssn_col, how='left')
+
+    return balances
 
 
 
