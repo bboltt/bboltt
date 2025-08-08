@@ -364,9 +364,28 @@ def get_balance_features(
         else "customerssn"
     )
 
-    deposit_fams = ["deposit_cons", "deposit_comm", "deposit_all"]
-    ti_fams      = ["ti_cons",      "ti_comm",      "ti_all"]
-    all_fams     = deposit_fams + ti_fams
+    deposit_fams = ['deposit_cons', 'deposit_comm']
+    ti_fams      = ['ti_cons',       'ti_comm']
+    all_fams     = deposit_fams        # only loop deposit families below
+
+    # ── TI‐ONLY FEATURES ────────────────────────────────────────────────────
+    # compute TI current‐day balance and positive‐flag, to join in at the end
+    ti_features = (
+        pivoted
+        # pivoted already has ti_cons_bal and ti_comm_bal columns
+        .withColumn('ti_all_bal', 
+            F.coalesce(F.col('ti_cons_bal'), F.lit(0)) + 
+            F.coalesce(F.col('ti_comm_bal'), F.lit(0))
+        )
+        .select(ssn_col, 'ods_business_dt', 'ti_all_bal')
+        .filter(F.col('ods_business_dt') == lookup_dt)
+        .groupBy(ssn_col)
+        .agg(
+            F.first('ti_all_bal', ignorenulls=True).alias('ti_all_bal'),
+            (F.first('ti_all_bal', ignorenulls=True) > 0).cast('int').alias('ti_all_positive_flag')
+        )
+    )
+    # ────────────────────────────────────────────────────────────────────────
 
     feature_frames = []
     for days in sorted(intervals, reverse=True):
