@@ -1,33 +1,40 @@
-Feature Name	Description
-cc_bal_current_max	Maximum current balance recorded on credit card.
-cc_bal_prev_max	Maximum previous balance recorded before current period.
-cc_bal_high_ltd_max	Maximum historical balance as a percentage of credit limit.
-cc_latefee_count	Total number of late fees incurred.
-cc_overlimit_event_count	Number of times the account went over its credit limit.
-cc_nsf_count	Number of returned payments due to insufficient funds (NSF).
-cc_ptp_broken_count	Count of broken promises to pay.
-cc_ptp_kept_count	Count of fulfilled promises to pay.
-cc_ptp_partial_count	Count of partially fulfilled promises to pay.
-cc_last_nsf_amt	Amount of the most recent NSF event.
-cc_ptp_broken_amt	Total amount associated with broken promises to pay.
-cc_ptp_kept_amt	Total amount associated with kept promises to pay.
-cc_ptp_partial_amt	Total amount associated with partially kept promises to pay.
-cc_months_min_pay_max	Maximum number of months where only the minimum payment was made.
-cc_amt_most_recent_pd	Amount paid in the most recent payment.
-cc_bal_high_pd_max	Highest balance ever recorded during a payment cycle.
-cc_cons_pd_days_max	Maximum number of consecutive past-due days.
-cc_days_since_chargeoff_reinstated	Days since the charge-off was reinstated (reversed).
-cc_days_since_first_use	Days since the credit card was first used.
-cc_days_since_nsf	Days since the last NSF event.
-cc_days_since_last_paid	Days since any amount was last paid.
-cc_days_since_last_payment	Days since the last full payment.
-cc_days_since_last_pd	Days since the last past-due occurrence.
-cc_days_since_high_bal_pd	Days since the highest past-due balance was observed.
-cc_days_since_fraud_flag	Days since the card was flagged for fraud.
-cc_days_since_security_flag	Days since a security issue was flagged on the card.
-cc_past_due_flag	Indicator flag for past-due status.
-cc_overlimit_flag	Indicator flag for being over the credit limit.
-cc_fraud_flag	Indicator flag for suspected or confirmed fraud on the account.
-cc_ever_active_flag	Flag indicating if the card was ever used or active.
-cc_vip_level	VIP classification level of the cardholder.
-lookup_dt	The reference date used to compute the features.
+# %%capture
+!pip -q install --upgrade openai
+
+import os
+from getpass import getpass
+from openai import OpenAI
+
+# 1) Set your API key (input is hidden in Colab).
+if not os.getenv("OPENAI_API_KEY"):
+    os.environ["OPENAI_API_KEY"] = getpass("OpenAI API key: ")
+
+client = OpenAI()
+
+# 2) Pick the model.
+# chatgpt-4o-latest auto-tracks the GPT-4o version used by ChatGPT.
+# If you have access and want the newest flagship instead, try "gpt-5-chat-latest".
+MODEL = "chatgpt-4o-latest"
+
+# 3) Tiny dialogue bot.
+def chat(msg, history=None, model=MODEL, temperature=0.2):
+    messages = (history[:] if history else []) + [{"role":"user","content":msg}]
+    resp = client.chat.completions.create(model=model, messages=messages, temperature=temperature)
+    text = resp.choices[0].message.content
+    usage = resp.usage
+    return text, messages + [{"role":"assistant","content":text}], usage
+
+# 4) Quick connectivity check.
+reply, hist, usage = chat("Reply with exactly: connected.")
+print("Model:", MODEL)
+print("Reply:", reply)
+print("Total tokens:", usage.total_tokens if usage else "n/a")
+
+# 5) Optional REPL: uncomment to chat interactively.
+# history = []
+# while True:
+#     q = input("You: ").strip()
+#     if q.lower() in {"exit","quit"}: break
+#     a, history, _ = chat(q, history)
+#     print("Bot:", a)
+
