@@ -1,42 +1,37 @@
-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
+for segment, tbl in prefix_to_table.items():
+    c = (
+        spark.table(tbl)
+        .where(F.col('ods_business_dt').between(F.lit(first_date_cp), F.lit(last_date_cp)))
+        .where(F.col('am00_date_close').isNotNull())
+        .select(
+            F.col('gsam_appl_num'),
+            F.to_date(F.col('am00_date_close')).alias('cp_acct_dt_closed'),
+            F.col('ods_business_dt').alias('ods_business_dt_cc'),
+        )
+        .alias('c')
+    )
 
-# %%capture
-!pip -q install --upgrade openai
+    p = all_custs_pop.alias('p')
 
-import os
-from getpass import getpass
-from openai import OpenAI
+    all_custs_pop = (
+        p.join(
+            c,
+            (F.col('p.prodcode') == F.lit('CC')) &
+            (F.substring(F.col('p.account_num'), 1, 7) == F.lit(segment)) &
+            (F.substring(F.col('p.account_num'), -9, 9) == F.col('c.gsam_appl_num')) &
+            (F.col('p.ods_business_dt') == F.col('c.ods_business_dt_cc')),
+            'left'
+        )
+        .select('p.*', F.col('c.cp_acct_dt_closed').alias('__cp_close'))
+        .withColumn(
+            'acct_dt_closed',
+            F.when(F.col('__cp_close').isNotNull(), F.col('__cp_close')).otherwise(F.col('acct_dt_closed'))
+        )
+        .withColumn(
+            'acct_open',
+            F.when(F.col('__cp_close').isNotNull(), F.lit(0)).otherwise(F.col('acct_open'))
+        )
+        .drop('__cp_close')
+    )
 
-# 1) Set your API key (input is hidden in Colab).
-if not os.getenv("OPENAI_API_KEY"):
-    os.environ["OPENAI_API_KEY"] = getpass("OpenAI API key: ")
-
-client = OpenAI()
-
-# 2) Pick the model.
-# chatgpt-4o-latest auto-tracks the GPT-4o version used by ChatGPT.
-# If you have access and want the newest flagship instead, try "gpt-5-chat-latest".
-MODEL = "chatgpt-4o-latest"
-
-# 3) Tiny dialogue bot.
-def chat(msg, history=None, model=MODEL, temperature=0.2):
-    messages = (history[:] if history else []) + [{"role":"user","content":msg}]
-    resp = client.chat.completions.create(model=model, messages=messages, temperature=temperature)
-    text = resp.choices[0].message.content
-    usage = resp.usage
-    return text, messages + [{"role":"assistant","content":text}], usage
-
-# 4) Quick connectivity check.
-reply, hist, usage = chat("Reply with exactly: connected.")
-print("Model:", MODEL)
-print("Reply:", reply)
-print("Total tokens:", usage.total_tokens if usage else "n/a")
-
-# 5) Optional REPL: uncomment to chat interactively.
-# history = []
-# while True:
-#     q = input("You: ").strip()
-#     if q.lower() in {"exit","quit"}: break
-#     a, history, _ = chat(q, history)
-#     print("Bot:", a)
 
