@@ -7,13 +7,12 @@ for segment, tbl in prefix_to_table.items():
             F.col('gsam_appl_num'),
             F.to_date(F.col('am00_date_close')).alias('cp_acct_dt_closed'),
             F.col('ods_business_dt').alias('ods_business_dt_cc'),
-        )
-        .alias('c')
+        ).alias('c')
     )
 
     p = all_custs_pop.alias('p')
 
-    all_custs_pop = (
+    joined = (
         p.join(
             c,
             (F.col('p.prodcode') == F.lit('CC')) &
@@ -22,16 +21,32 @@ for segment, tbl in prefix_to_table.items():
             (F.col('p.ods_business_dt') == F.col('c.ods_business_dt_cc')),
             'left'
         )
-        .select('p.*', F.col('c.cp_acct_dt_closed').alias('__cp_close'))
+        # carry left columns, plus right-side fields ONLY as temps
+        .select('p.*',
+                F.col('c.cp_acct_dt_closed').alias('__cp_close'),
+                F.col('c.ods_business_dt_cc').alias('__ods_cc'))
         .withColumn(
             'acct_dt_closed',
-            F.when(F.col('__cp_close').isNotNull(), F.col('__cp_close')).otherwise(F.col('acct_dt_closed'))
+            F.when(F.col('__cp_close').isNotNull(), F.col('__cp_close'))
+             .otherwise(F.col('acct_dt_closed'))
         )
         .withColumn(
             'acct_open',
-            F.when(F.col('__cp_close').isNotNull(), F.lit(0)).otherwise(F.col('acct_open'))
+            F.when(F.col('__cp_close').isNotNull(), F.lit(0))
+             .otherwise(F.col('acct_open'))
         )
-        .drop('__cp_close')
     )
 
+    # create or update the single canonical ods_business_dt_cc
+    if 'ods_business_dt_cc' in joined.columns:
+        # overwrite with coalesce so previously-set values persist
+        joined = joined.withColumn(
+            'ods_business_dt_cc',
+            F.coalesce(F.col('ods_business_dt_cc'), F.col('__ods_cc'))
+        )
+    else:
+        joined = joined.withColumn('ods_business_dt_cc', F.col('__ods_cc'))
+
+    # drop temps so nothing ambiguous survives to next iteration
+    all_custs_pop = joined.drop('__cp_close', '__ods_cc')
 
