@@ -1,52 +1,111 @@
-for segment, tbl in prefix_to_table.items():
-    c = (
-        spark.table(tbl)
-        .where(F.col('ods_business_dt').between(F.lit(first_date_cp), F.lit(last_date_cp)))
-        .where(F.col('am00_date_close').isNotNull())
-        .select(
-            F.col('gsam_appl_num'),
-            F.to_date(F.col('am00_date_close')).alias('cp_acct_dt_closed'),
-            F.col('ods_business_dt').alias('ods_business_dt_cc'),
-        ).alias('c')
-    )
+import pandas as pd
+import numpy as np
+from pathlib import Path
 
-    p = all_custs_pop.alias('p')
+# ---- CONFIG ----
+CORR_CSV = "correlation_all_features_pearson.csv"
+FI_CSV   = "feature_importance_summary.csv"
+THRESH   = 0.90                  # absolute Pearson threshold
+OUT_DROP = "features_to_drop_corr090.csv"
 
-    joined = (
-        p.join(
-            c,
-            (F.col('p.prodcode') == F.lit('CC')) &
-            (F.substring(F.col('p.account_num'), 1, 7) == F.lit(segment)) &
-            (F.substring(F.col('p.account_num'), -9, 9) == F.col('c.gsam_appl_num')) &
-            (F.col('p.ods_business_dt') == F.col('c.ods_business_dt_cc')),
-            'left'
-        )
-        # carry left columns, plus right-side fields ONLY as temps
-        .select('p.*',
-                F.col('c.cp_acct_dt_closed').alias('__cp_close'),
-                F.col('c.ods_business_dt_cc').alias('__ods_cc'))
-        .withColumn(
-            'acct_dt_closed',
-            F.when(F.col('__cp_close').isNotNull(), F.col('__cp_close'))
-             .otherwise(F.col('acct_dt_closed'))
-        )
-        .withColumn(
-            'acct_open',
-            F.when(F.col('__cp_close').isNotNull(), F.lit(0))
-             .otherwise(F.col('acct_open'))
-        )
-    )
+# ---- load correlation matrix (square) ----
+corr = pd.read_csv(CORR_CSV)
+# assume first column is the index with feature names if not already
+if corr.columns[0] != corr.index.name:
+    # try to set index from first column if it’s the feature name column
+    if corr.columns[0] not in corr.columns[1:]:
+        corr = corr.set_index(corr.columns[0])
 
-    # create or update the single canonical ods_business_dt_cc
-    if 'ods_business_dt_cc' in joined.columns:
-        # overwrite with coalesce so previously-set values persist
-        joined = joined.withColumn(
-            'ods_business_dt_cc',
-            F.coalesce(F.col('ods_business_dt_cc'), F.col('__ods_cc'))
-        )
+# sanity: make symmetric and zero self-corr
+corr = corr.astype(float)
+np.fill_diagonal(corr.values, 0.0)
+
+# melt into pairs (i < j) to avoid duplicates
+pairs = (
+    corr.stack()
+         .rename("corr")
+         .reset_index(names=["f1", "f2"])
+)
+pairs = pairs[pairs["f1"] < pairs["f2"]]              # i<j
+pairs = pairs[pairs["corr"].abs() >= THRESH]          # strong correlations only
+
+# ---- load feature importance ----
+fi = pd.read_csv(FI_CSV)
+
+# pick an "importance" score:
+# 1) average of all columns starting with "gain_pct"
+gain_pct_cols = [c for c in fi.columns if c.startswith("gain_pct")]
+if gain_pct_cols:
+    fi["importance"] = fi[gain_pct_cols].mean(axis=1)
+else:
+    # 2) else average of all columns starting with "gain"
+    gain_cols = [c for c in fi.columns if c.startswith("gain")]
+    if gain_cols:
+        fi["importance"] = fi[gain_cols].mean(axis=1)
     else:
-        joined = joined.withColumn('ods_business_dt_cc', F.col('__ods_cc'))
+        # 3) fallback: if only a single 'gain' or 'importance' available, try those
+        for cand in ("importance","gain","Gain","gain_mean"):
+            if cand in fi.columns:
+                fi["importance"] = fi[cand]
+                break
+        if "importance" not in fi.columns:
+            raise ValueError("Could not find importance columns (gain_pct*/gain*/importance) in FI file.")
 
-    # drop temps so nothing ambiguous survives to next iteration
-    all_custs_pop = joined.drop('__cp_close', '__ods_cc')
+fi = fi[["feature","importance"]].drop_duplicates()
+imp = dict(zip(fi["feature"], fi["importance"]))
+
+# default importance (very small) for any feature missing in FI
+def get_imp(f): 
+    v = imp.get(f)
+    return float(v) if pd.notnull(v) else -1e9
+
+# ---- build neighbor graph for correlation ≥ THRESH ----
+from collections import defaultdict
+nbrs = defaultdict(set)
+for _, r in pairs.iterrows():
+    a, b = r["f1"], r["f2"]
+    nbrs[a].add(b)
+    nbrs[b].add(a)
+
+all_feats = set(corr.index.tolist())
+# sort all features by importance (desc), tie-break by name (asc)
+ordered = sorted(all_feats, key=lambda f: (-get_imp(f), f))
+
+keep, drop = set(), set()
+
+# greedy: walk in importance order; keep first in each correlated cluster, drop its neighbors
+for f in ordered:
+    if f in drop or f in keep:
+        continue
+    keep.add(f)
+    for n in nbrs.get(f, []):
+        if n not in keep:
+            drop.add(n)
+
+# Optionally: restrict to only features present in your model input (i.e., present in FI)
+# drop = [f for f in drop if f in imp]
+
+# ---- save & show ----
+drop_list = pd.DataFrame({"feature_to_drop": sorted(drop)})
+drop_list.to_csv(OUT_DROP, index=False)
+print(f"Dropping {len(drop)} features at |corr| ≥ {THRESH}. Saved to {OUT_DROP}.")
+
+# A short summary:
+print("\nTop 20 kept features (by importance) for transparency:")
+print(pd.DataFrame({"feature": list(keep)[:20],
+                    "importance": [get_imp(f) for f in list(keep)[:20]]}).sort_values("importance", ascending=False))
+
+# If you want to see a sample of conflicts that caused drops:
+if not pairs.empty:
+    # join pairs with importance to show which side won
+    tmp = pairs.copy()
+    tmp["imp_f1"] = tmp["f1"].map(get_imp)
+    tmp["imp_f2"] = tmp["f2"].map(get_imp)
+    tmp["kept"]   = np.where(tmp["imp_f1"] >= tmp["imp_f2"], tmp["f1"], tmp["f2"])
+    tmp["dropped"]= np.where(tmp["imp_f1"] >= tmp["imp_f2"], tmp["f2"], tmp["f1"])
+    # only show those actually dropped by the greedy pass
+    sample = tmp[tmp["dropped"].isin(drop)].sort_values("corr", key=np.abs, ascending=False).head(25)
+    if not sample.empty:
+        print("\nExamples of highly correlated pairs where the lower-importance feature was dropped:")
+        print(sample[["f1","f2","corr","imp_f1","imp_f2","kept","dropped"]].to_string(index=False))
 
