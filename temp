@@ -1,79 +1,97 @@
+# ===== configure =====
 import pandas as pd
 import numpy as np
-from collections import defaultdict
+from collections import defaultdict, deque
 
-# ------------ CONFIG ------------
-CORR_CSV = "correlation_all_features_pearson.csv"   # square Pearson matrix
-IV_CSV   = "information_values_filledna.csv"        # has columns like: Variable, IV
-THRESH   = 0.90                                     # absolute corr threshold
-OUT_DROP = "features_to_drop_corr090_byIV.csv"
-# --------------------------------
+# paths
+CORR_CSV = "/path/to/correlation_all_features_pearson.csv"
+IV_CSV   = "/path/to/information_values.csv"
 
-# 1) Load correlation matrix
+THRESH = 0.90
+LABEL_COL = "fraud_label_180"   # drop this if present
+
+# ===== load & clean correlation matrix =====
 corr = pd.read_csv(CORR_CSV)
+
+# If the first column is the row labels (e.g., "Unnamed: 0"), move it to index
 if corr.columns[0] not in corr.columns[1:]:
     corr = corr.set_index(corr.columns[0])
+
+# Ensure square & aligned: keep only intersection of rows/cols and same order
+common = corr.index.intersection(corr.columns)
+corr = corr.loc[common, common]
+
+# Drop the label row/col if it slipped in
+if LABEL_COL in corr.index:
+    corr = corr.drop(index=LABEL_COL, columns=LABEL_COL, errors="ignore")
+
+# Force numeric and zero-out diagonal
 corr = corr.astype(float)
 np.fill_diagonal(corr.values, 0.0)
 
-pairs = (
-    corr.stack()
-         .rename("corr")
-         .reset_index(names=["f1","f2"])
-)
-pairs = pairs[pairs["f1"] < pairs["f2"]]
-pairs = pairs[pairs["corr"].abs() >= THRESH]
+# ===== load IVs =====
+iv = pd.read_csv(IV_CSV)
+# Your file looks like columns 'Variable' and 'IV'
+iv = iv.rename(columns={c: c.strip() for c in iv.columns})
+iv["Variable"] = iv["Variable"].astype(str).str.strip()
+iv["IV"] = pd.to_numeric(iv["IV"], errors="coerce")
+iv_map = dict(zip(iv["Variable"], iv["IV"]))
 
-# 2) Load Information Value table
-iv_df = pd.read_csv(IV_CSV)
-iv_df.columns = [c.strip().lower() for c in iv_df.columns]
-feat_col = "variable" if "variable" in iv_df.columns else "feature"
-iv_col   = "iv"        if "iv"        in iv_df.columns else iv_df.columns[1]
-iv_df = iv_df[[feat_col, iv_col]].rename(columns={feat_col:"feature", iv_col:"iv"})
-iv_df["iv"] = pd.to_numeric(iv_df["iv"], errors="coerce")
-
-iv_map = dict(zip(iv_df["feature"], iv_df["iv"]))
-
+# Fallback: any feature missing in IV map gets very small IV so it loses tie-breaks
 def get_iv(f):
     v = iv_map.get(f)
-    return float(v) if pd.notnull(v) else -1e9   # very small if missing IV
+    return -1e9 if pd.isna(v) else float(v)
 
-# 3) Build neighbor graph for |corr| >= THRESH
-nbrs = defaultdict(set)
-for _, r in pairs.iterrows():
-    a, b = r["f1"], r["f2"]
-    nbrs[a].add(b); nbrs[b].add(a)
+# ===== build the graph of highly correlated pairs (upper triangle only) =====
+# mask upper triangle (k=1 excludes diagonal)
+mask = np.triu(np.ones_like(corr, dtype=bool), k=1)
+high = (corr.where(mask).abs() >= THRESH)
 
-# 4) Greedy selection by IV: keep highest-IV feature in each cluster
-all_feats = set(corr.index.tolist())
-ordered = sorted(all_feats, key=lambda f: (-get_iv(f), f))  # tie-break by name for determinism
+pairs = []
+idx = high.index.to_list()
+cols = high.columns.to_list()
+arr = high.values
+for i in range(arr.shape[0]):
+    for j in range(i+1, arr.shape[1]):
+        if arr[i, j]:
+            f1, f2 = idx[i], cols[j]
+            pairs.append((f1, f2))
 
-keep, drop = set(), set()
-for f in ordered:
-    if f in keep or f in drop:
-        continue
-    keep.add(f)
-    for n in nbrs.get(f, ()):
-        if n not in keep:
-            drop.add(n)
+# Nothing to drop?
+if not pairs:
+    pd.DataFrame(columns=["feature"]).to_csv("features_to_drop.csv", index=False)
+    print("No pairs with |corr| >=", THRESH, "- drop list is empty.")
+else:
+    # Build adjacency for connected components
+    adj = defaultdict(set)
+    for a, b in pairs:
+        adj[a].add(b)
+        adj[b].add(a)
 
-# 5) Save list to drop
-pd.DataFrame({"feature_to_drop": sorted(drop)}).to_csv(OUT_DROP, index=False)
-print(f"Dropping {len(drop)} features at |corr| >= {THRESH} using IV. Saved -> {OUT_DROP}")
+    visited = set()
+    to_drop = set()
 
-# (Optional) show a few representative conflicts
-if not pairs.empty:
-    tmp = pairs.copy()
-    tmp["iv_f1"] = tmp["f1"].map(get_iv)
-    tmp["iv_f2"] = tmp["f2"].map(get_iv)
-    tmp["kept"] = np.where(tmp["iv_f1"] >= tmp["iv_f2"], tmp["f1"], tmp["f2"])
-    tmp["dropped"] = np.where(tmp["iv_f1"] >= tmp["iv_f2"], tmp["f2"], tmp["f1"])
-    demo = tmp[tmp["dropped"].isin(drop)].sort_values("corr", key=np.abs, ascending=False).head(20)
-    if not demo.empty:
-        print("\nExamples:")
-        print(demo[["f1","f2","corr","iv_f1","iv_f2","kept","dropped"]].to_string(index=False))
+    # For each connected component, keep the single best IV, drop the rest
+    for start in list(adj.keys()):
+        if start in visited:
+            continue
+        comp = set()
+        q = [start]
+        while q:
+            u = q.pop()
+            if u in visited:
+                continue
+            visited.add(u)
+            comp.add(u)
+            q.extend(v for v in adj[u] if v not in visited)
 
+        # pick the best by (IV, then name) to break ties deterministically
+        keep = max(comp, key=lambda f: (get_iv(f), f))
+        to_drop |= (comp - {keep})
 
+    # Save
+    pd.DataFrame(sorted(to_drop), columns=["feature"]).to_csv("features_to_drop.csv", index=False)
+    print(f"Dropping {len(to_drop)} features. Saved to features_to_drop.csv")
 
 
 
