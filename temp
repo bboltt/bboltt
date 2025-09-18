@@ -1,5 +1,95 @@
 import pandas as pd
 import numpy as np
+from collections import defaultdict
+
+# ------------ CONFIG ------------
+CORR_CSV = "correlation_all_features_pearson.csv"   # square Pearson matrix
+IV_CSV   = "information_values_filledna.csv"        # has columns like: Variable, IV
+THRESH   = 0.90                                     # absolute corr threshold
+OUT_DROP = "features_to_drop_corr090_byIV.csv"
+# --------------------------------
+
+# 1) Load correlation matrix
+corr = pd.read_csv(CORR_CSV)
+if corr.columns[0] not in corr.columns[1:]:
+    corr = corr.set_index(corr.columns[0])
+corr = corr.astype(float)
+np.fill_diagonal(corr.values, 0.0)
+
+pairs = (
+    corr.stack()
+         .rename("corr")
+         .reset_index(names=["f1","f2"])
+)
+pairs = pairs[pairs["f1"] < pairs["f2"]]
+pairs = pairs[pairs["corr"].abs() >= THRESH]
+
+# 2) Load Information Value table
+iv_df = pd.read_csv(IV_CSV)
+iv_df.columns = [c.strip().lower() for c in iv_df.columns]
+feat_col = "variable" if "variable" in iv_df.columns else "feature"
+iv_col   = "iv"        if "iv"        in iv_df.columns else iv_df.columns[1]
+iv_df = iv_df[[feat_col, iv_col]].rename(columns={feat_col:"feature", iv_col:"iv"})
+iv_df["iv"] = pd.to_numeric(iv_df["iv"], errors="coerce")
+
+iv_map = dict(zip(iv_df["feature"], iv_df["iv"]))
+
+def get_iv(f):
+    v = iv_map.get(f)
+    return float(v) if pd.notnull(v) else -1e9   # very small if missing IV
+
+# 3) Build neighbor graph for |corr| >= THRESH
+nbrs = defaultdict(set)
+for _, r in pairs.iterrows():
+    a, b = r["f1"], r["f2"]
+    nbrs[a].add(b); nbrs[b].add(a)
+
+# 4) Greedy selection by IV: keep highest-IV feature in each cluster
+all_feats = set(corr.index.tolist())
+ordered = sorted(all_feats, key=lambda f: (-get_iv(f), f))  # tie-break by name for determinism
+
+keep, drop = set(), set()
+for f in ordered:
+    if f in keep or f in drop:
+        continue
+    keep.add(f)
+    for n in nbrs.get(f, ()):
+        if n not in keep:
+            drop.add(n)
+
+# 5) Save list to drop
+pd.DataFrame({"feature_to_drop": sorted(drop)}).to_csv(OUT_DROP, index=False)
+print(f"Dropping {len(drop)} features at |corr| >= {THRESH} using IV. Saved -> {OUT_DROP}")
+
+# (Optional) show a few representative conflicts
+if not pairs.empty:
+    tmp = pairs.copy()
+    tmp["iv_f1"] = tmp["f1"].map(get_iv)
+    tmp["iv_f2"] = tmp["f2"].map(get_iv)
+    tmp["kept"] = np.where(tmp["iv_f1"] >= tmp["iv_f2"], tmp["f1"], tmp["f2"])
+    tmp["dropped"] = np.where(tmp["iv_f1"] >= tmp["iv_f2"], tmp["f2"], tmp["f1"])
+    demo = tmp[tmp["dropped"].isin(drop)].sort_values("corr", key=np.abs, ascending=False).head(20)
+    if not demo.empty:
+        print("\nExamples:")
+        print(demo[["f1","f2","corr","iv_f1","iv_f2","kept","dropped"]].to_string(index=False))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+import pandas as pd
+import numpy as np
 from pathlib import Path
 
 # ---- CONFIG ----
