@@ -66,6 +66,11 @@ if not pairs:
                               "direct_edge","partner_in_comp","corr_with_partner",
                               "related_features"]) \
       .to_csv("features_to_drop_audit.csv", index=False)
+    # ===================== UPDATED: write empty chain file too =====================
+    pd.DataFrame([], columns=["feature_to_drop","kept_feature","component_id",
+                              "chain_member","iv_chain_member","corr_chain_member_to_kept",
+                              "abs_corr_chain_member_to_kept","direct_edge_to_kept"]) \
+      .to_csv("features_to_drop_chain_iv.csv", index=False)
 else:
     # ======================
     # adjacency and edge correlation (signed) for DIRECT checks
@@ -76,6 +81,35 @@ else:
         adj[a].add(b)
         adj[b].add(a)
         edge_corr[frozenset((a, b))] = float(corr.loc[a, b])
+
+    # ===================== UPDATED: compute connected components for chain reporting =====================
+    comp_id_of = {}        # feature -> component id
+    components = []        # list of sets (members of each component)
+    seen = set()
+    for start in list(adj.keys()):
+        if start in seen:
+            continue
+        comp = set()
+        q = deque([start])
+        while q:
+            u = q.popleft()
+            if u in seen:
+                continue
+            seen.add(u)
+            comp.add(u)
+            for v in adj[u]:
+                if v not in seen:
+                    q.append(v)
+        cid = len(components)
+        for x in comp:
+            comp_id_of[x] = cid
+        components.append(comp)
+    # also handle isolated features (no edges) so selection order is complete
+    for f in corr.columns:
+        if f not in comp_id_of:
+            cid = len(components)
+            components.append({f})
+            comp_id_of[f] = cid
 
     # all features seen
     all_feats = list(set(corr.columns) | set(adj.keys()))
@@ -122,13 +156,42 @@ else:
             "related_features": keeper              # keep audit compact: direct cause only
         })
 
+    # ===================== UPDATED: long/tidy chain file per dropped feature =====================
+    # For each dropped feature, output the full component members (chain),
+    # with each member's IV and correlation to the kept feature.
+    chain_rows = []
+    for g in sorted(to_drop):
+        keeper, cval = reason[g]
+        cid = comp_id_of.get(g)
+        comp = components[cid] if cid is not None else {g, keeper}
+        for m in sorted(comp):
+            iv_m = get_iv(m)
+            # correlation to kept (can be below threshold for non-direct members)
+            try:
+                corr_mk = float(corr.loc[m, keeper])
+            except KeyError:
+                corr_mk = np.nan
+            chain_rows.append({
+                "feature_to_drop": g,
+                "kept_feature": keeper,
+                "component_id": cid,
+                "chain_member": m,
+                "iv_chain_member": iv_m,
+                "corr_chain_member_to_kept": corr_mk,
+                "abs_corr_chain_member_to_kept": abs(corr_mk) if pd.notnull(corr_mk) else np.nan,
+                "direct_edge_to_kept": int(frozenset((m, keeper)) in edge_corr)
+            })
+
     # ======================
     # outputs
     # ======================
     pd.DataFrame(sorted(to_drop), columns=["feature"]).to_csv("features_to_drop.csv", index=False)
     pd.DataFrame(audit_rows).to_csv("features_to_drop_audit.csv", index=False)
+    # ===================== UPDATED: write chain/IV long file =====================
+    pd.DataFrame(chain_rows).to_csv("features_to_drop_chain_iv.csv", index=False)
 
-    print(f"Kept {len(kept)} features; Dropping {len(to_drop)}.")
+    print(f"Kept {len(kept)} features; Dropping {len(to_drop)}. Wrote features_to_drop.csv, features_to_drop_audit.csv, and features_to_drop_chain_iv.csv")
+
 
 
 
