@@ -1,318 +1,147 @@
-import pandas as pd
-import numpy as np
-from collections import defaultdict, deque  # deque unused but kept to avoid edits elsewhere
+def create_temp_view_of_lookup(
+    spark: SparkSession,
+    first_date: str,
+    last_date: str,
+):
+    # ----------------------------------------------------------------------
+    # [unchanged code above here: your bp_base_pop, rcds_base, rcds_accts,
+    #  rcds_appdates, get_closest_partition usages for RFCQ, etc.]
+    # ----------------------------------------------------------------------
 
-# --- inputs (same variables) ---
-CORR_CSV = "/development_work/cs_2025/misc_figures/6_newer_sample_custs_with_accts/correlation_all_features_pearson.csv"
-IV_CSV   = "/development_work/cs_2025/misc_figures/7_newer_sample_0912_custs_with_accts/information_values_filledna.csv"
-THRESH   = 0.9
-LABEL_COL = "fraud_label_180"
+    # ======================================================================
+    # >>> CHANGED: helper to choose DO partitions covering [first_date, last_date]
+    # ======================================================================
+    from datetime import datetime
+    from dateutil.relativedelta import relativedelta
 
-# ======================
-# load correlation matrix
-# ======================
-corr = pd.read_csv(CORR_CSV)
-# if first column is an index col, set it as index
-if corr.columns[0] not in corr.columns[1:]:
-    corr = corr.set_index(corr.columns[0])
+    def _do_parts(spark, table_name: str, first_date: str, last_date: str) -> list[str]:
+        """
+        Walk DO snapshots backward ~3 years at a time, ensuring we include:
+         - the partition AFTER last_date
+         - the first partition AFTER first_date
+        Returns a de-duplicated, insertion-order list of partition dates (YYYY-MM-DD).
+        """
+        parts, seen = [], set()
+        cur = datetime.strptime(last_date, "%Y-%m-%d")
+        first_dt = datetime.strptime(first_date, "%Y-%m-%d")
 
-# keep only symmetric intersection (defensive)
-common = corr.index.intersection(corr.columns)
-corr = corr.loc[common, common]
-
-# drop label row/col if present (safe)
-if LABEL_COL in corr.index:
-    corr = corr.drop(index=LABEL_COL, errors="ignore")
-    corr = corr.drop(columns=LABEL_COL, errors="ignore")
-
-# ensure numeric and zero diagonal
-corr = corr.astype(float)
-np.fill_diagonal(corr.values, 0.0)
-
-# ======================
-# load IVs (keep your column names)
-# ======================
-iv = pd.read_csv(IV_CSV)
-# normalize typical columns "Variable","IV"
-iv = iv.rename(columns={c: c.strip() for c in iv.columns})
-iv["Variable"] = iv["Variable"].astype(str).str.strip()
-iv["IV"] = pd.to_numeric(iv["IV"], errors="coerce")
-
-iv_map = dict(zip(iv["Variable"], iv["IV"]))
-
-def get_iv(f):
-    v = iv_map.get(f, np.nan)
-    return -1e15 if pd.isna(v) else float(v)
-
-# ======================
-# build high-corr pairs (|corr| >= THRESH), upper triangle only
-# ======================
-pairs = []
-cols = corr.columns.tolist()
-arr = corr.values
-n = arr.shape[0]
-for i in range(n):
-    # j>i upper triangle
-    hi = np.where(np.abs(arr[i, i+1:]) >= THRESH)[0]
-    for off in hi:
-        j = i + 1 + int(off)
-        pairs.append((cols[i], cols[j]))
-
-# short-circuit if nothing to prune
-if not pairs:
-    print("No pairs with |corr| >=", THRESH)
-    pd.DataFrame([], columns=["feature"]).to_csv("features_to_drop.csv", index=False)
-    pd.DataFrame([], columns=["feature_to_drop","kept_feature","corr_with_kept",
-                              "direct_edge","partner_in_comp","corr_with_partner",
-                              "related_features"]) \
-      .to_csv("features_to_drop_audit.csv", index=False)
-    # ===================== UPDATED: write empty chain file too =====================
-    pd.DataFrame([], columns=["feature_to_drop","kept_feature","component_id",
-                              "chain_member","iv_chain_member","corr_chain_member_to_kept",
-                              "abs_corr_chain_member_to_kept","direct_edge_to_kept"]) \
-      .to_csv("features_to_drop_chain_iv.csv", index=False)
-else:
-    # ======================
-    # adjacency and edge correlation (signed) for DIRECT checks
-    # ======================
-    adj = defaultdict(set)
-    edge_corr = {}
-    for a, b in pairs:
-        adj[a].add(b)
-        adj[b].add(a)
-        edge_corr[frozenset((a, b))] = float(corr.loc[a, b])
-
-    # ===================== UPDATED: compute connected components for chain reporting =====================
-    comp_id_of = {}        # feature -> component id
-    components = []        # list of sets (members of each component)
-    seen = set()
-    for start in list(adj.keys()):
-        if start in seen:
-            continue
-        comp = set()
-        q = deque([start])
-        while q:
-            u = q.popleft()
-            if u in seen:
-                continue
-            seen.add(u)
-            comp.add(u)
-            for v in adj[u]:
-                if v not in seen:
-                    q.append(v)
-        cid = len(components)
-        for x in comp:
-            comp_id_of[x] = cid
-        components.append(comp)
-    # also handle isolated features (no edges) so selection order is complete
-    for f in corr.columns:
-        if f not in comp_id_of:
-            cid = len(components)
-            components.append({f})
-            comp_id_of[f] = cid
-
-    # all features seen
-    all_feats = list(set(corr.columns) | set(adj.keys()))
-
-    # order by IV desc, tiebreak by name for determinism
-    order = sorted(all_feats, key=lambda f: (get_iv(f), f), reverse=True)
-
-    kept = []
-    to_drop = set()
-    covered = set()          # features already handled (kept or blocked by a kept)
-    reason = {}              # feature -> (kept_feature, corr_used)
-    audit_rows = []
-
-    for f in order:
-        if f in covered:
-            continue
-        # keep f
-        kept.append(f)
-        covered.add(f)
-
-        # drop only direct neighbors with |corr| >= THRESH
-        for g in adj[f]:
-            if g in covered:
-                continue
-            c_fg = float(corr.loc[f, g])
-            if abs(c_fg) >= THRESH:
-                covered.add(g)
-                # keep strongest direct reason if multiple
-                prev = reason.get(g)
-                if (prev is None) or (abs(c_fg) > abs(prev[1])):
-                    reason[g] = (f, c_fg)
-                to_drop.add(g)
-
-    # --- build compact audit: every dropped feature has a direct cause keeper
-    for g in sorted(to_drop):
-        keeper, cval = reason[g]
-        audit_rows.append({
-            "feature_to_drop": g,
-            "kept_feature": keeper,
-            "corr_with_kept": float(cval),
-            "direct_edge": 1,
-            "partner_in_comp": keeper,              # same as kept_feature; direct cause
-            "corr_with_partner": float(cval),       # same correlation value
-            "related_features": keeper              # keep audit compact: direct cause only
-        })
-
-    # ===================== UPDATED: long/tidy chain file per dropped feature =====================
-    # For each dropped feature, output the full component members (chain),
-    # with each member's IV and correlation to the kept feature.
-    chain_rows = []
-    for g in sorted(to_drop):
-        keeper, cval = reason[g]
-        cid = comp_id_of.get(g)
-        comp = components[cid] if cid is not None else {g, keeper}
-        for m in sorted(comp):
-            iv_m = get_iv(m)
-            # correlation to kept (can be below threshold for non-direct members)
-            try:
-                corr_mk = float(corr.loc[m, keeper])
-            except KeyError:
-                corr_mk = np.nan
-            chain_rows.append({
-                "feature_to_drop": g,
-                "kept_feature": keeper,
-                "component_id": cid,
-                "chain_member": m,
-                "iv_chain_member": iv_m,
-                "corr_chain_member_to_kept": corr_mk,
-                "abs_corr_chain_member_to_kept": abs(corr_mk) if pd.notnull(corr_mk) else np.nan,
-                "direct_edge_to_kept": int(frozenset((m, keeper)) in edge_corr)
-            })
-
-    # ======================
-    # outputs
-    # ======================
-    pd.DataFrame(sorted(to_drop), columns=["feature"]).to_csv("features_to_drop.csv", index=False)
-    pd.DataFrame(audit_rows).to_csv("features_to_drop_audit.csv", index=False)
-    # ===================== UPDATED: write chain/IV long file =====================
-    pd.DataFrame(chain_rows).to_csv("features_to_drop_chain_iv.csv", index=False)
-
-    print(f"Kept {len(kept)} features; Dropping {len(to_drop)}. Wrote features_to_drop.csv, features_to_drop_audit.csv, and features_to_drop_chain_iv.csv")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-import pandas as pd
-import numpy as np
-from pathlib import Path
-
-# ---- CONFIG ----
-CORR_CSV = "correlation_all_features_pearson.csv"
-FI_CSV   = "feature_importance_summary.csv"
-THRESH   = 0.90                  # absolute Pearson threshold
-OUT_DROP = "features_to_drop_corr090.csv"
-
-# ---- load correlation matrix (square) ----
-corr = pd.read_csv(CORR_CSV)
-# assume first column is the index with feature names if not already
-if corr.columns[0] != corr.index.name:
-    # try to set index from first column if it’s the feature name column
-    if corr.columns[0] not in corr.columns[1:]:
-        corr = corr.set_index(corr.columns[0])
-
-# sanity: make symmetric and zero self-corr
-corr = corr.astype(float)
-np.fill_diagonal(corr.values, 0.0)
-
-# melt into pairs (i < j) to avoid duplicates
-pairs = (
-    corr.stack()
-         .rename("corr")
-         .reset_index(names=["f1", "f2"])
-)
-pairs = pairs[pairs["f1"] < pairs["f2"]]              # i<j
-pairs = pairs[pairs["corr"].abs() >= THRESH]          # strong correlations only
-
-# ---- load feature importance ----
-fi = pd.read_csv(FI_CSV)
-
-# pick an "importance" score:
-# 1) average of all columns starting with "gain_pct"
-gain_pct_cols = [c for c in fi.columns if c.startswith("gain_pct")]
-if gain_pct_cols:
-    fi["importance"] = fi[gain_pct_cols].mean(axis=1)
-else:
-    # 2) else average of all columns starting with "gain"
-    gain_cols = [c for c in fi.columns if c.startswith("gain")]
-    if gain_cols:
-        fi["importance"] = fi[gain_cols].mean(axis=1)
-    else:
-        # 3) fallback: if only a single 'gain' or 'importance' available, try those
-        for cand in ("importance","gain","Gain","gain_mean"):
-            if cand in fi.columns:
-                fi["importance"] = fi[cand]
+        while True:
+            p = get_closest_partition(spark, table_name, cur.strftime("%Y-%m-%d"), get_after_date=True)
+            if p in seen:  # safety against accidental loop
                 break
-        if "importance" not in fi.columns:
-            raise ValueError("Could not find importance columns (gain_pct*/gain*/importance) in FI file.")
+            parts.append(p)
+            seen.add(p)
 
-fi = fi[["feature","importance"]].drop_duplicates()
-imp = dict(zip(fi["feature"], fi["importance"]))
+            # each DO snapshot contains about the prior 3 years of history
+            cur = datetime.strptime(p, "%Y-%m-%d") - relativedelta(years=3)
 
-# default importance (very small) for any feature missing in FI
-def get_imp(f): 
-    v = imp.get(f)
-    return float(v) if pd.notnull(v) else -1e9
+            # once we’ve stepped back past first_date, include the first partition AFTER first_date and stop
+            if cur <= first_dt:
+                p_first = get_closest_partition(spark, table_name, first_date, get_after_date=True)
+                if p_first not in seen:
+                    parts.append(p_first)
+                break
 
-# ---- build neighbor graph for correlation ≥ THRESH ----
-from collections import defaultdict
-nbrs = defaultdict(set)
-for _, r in pairs.iterrows():
-    a, b = r["f1"], r["f2"]
-    nbrs[a].add(b)
-    nbrs[b].add(a)
+        # de-dupe preserve order
+        out, seen2 = [], set()
+        for d in parts:
+            if d not in seen2:
+                out.append(d)
+                seen2.add(d)
+        return out
+    # ======================================================================
+    # <<< CHANGED helper ends
+    # ======================================================================
 
-all_feats = set(corr.index.tolist())
-# sort all features by importance (desc), tie-break by name (asc)
-ordered = sorted(all_feats, key=lambda f: (-get_imp(f), f))
+    # ----------------------------------------------------------------------
+    # [unchanged code here: any RFCQ / RCF tables you assembled before DO]
+    # ----------------------------------------------------------------------
 
-keep, drop = set(), set()
+    # ======================================================================
+    # >>> CHANGED: DO accounts block (replaces the TODO & any hard-coded lists)
+    # ======================================================================
 
-# greedy: walk in importance order; keep first in each correlated cluster, drop its neighbors
-for f in ordered:
-    if f in drop or f in keep:
-        continue
-    keep.add(f)
-    for n in nbrs.get(f, []):
-        if n not in keep:
-            drop.add(n)
+    # pick the required partitions for each DO table
+    do_app_parts       = _do_parts(spark, "sl1_do_tbl_application_h",         first_date, last_date)
+    do_consumer_parts  = _do_parts(spark, "sl1_do_tbl_consumerloan_h",        first_date, last_date)
+    do_prodcd_parts    = _do_parts(spark, "sl1_do_tbl_productcd_h",           first_date, last_date)
+    do_prodtype_parts  = _do_parts(spark, "sl1_do_tbl_producttype_h",         first_date, last_date)
+    do_custprod_parts  = _do_parts(spark, "sl1_do_tbl_customerproducts_h",    first_date, last_date)
 
-# Optionally: restrict to only features present in your model input (i.e., present in FI)
-# drop = [f for f in drop if f in imp]
+    # optional: print to verify which snapshots are used
+    # print("DO partitions:",
+    #       "\n  application_h :", do_app_parts,
+    #       "\n  consumerloan_h:", do_consumer_parts,
+    #       "\n  productcd_h   :", do_prodcd_parts,
+    #       "\n  producttype_h :", do_prodtype_parts,
+    #       "\n  customerproducts_h:", do_custprod_parts)
 
-# ---- save & show ----
-drop_list = pd.DataFrame({"feature_to_drop": sorted(drop)})
-drop_list.to_csv(OUT_DROP, index=False)
-print(f"Dropping {len(drop)} features at |corr| ≥ {THRESH}. Saved to {OUT_DROP}.")
+    do_app = (
+        spark.table("sl1_do_tbl_application_h")
+             .filter(F.col("ods_business_dt").isin(do_app_parts))
+             .select(
+                 F.col("ods_business_dt"),
+                 F.col("applicationid"),
+                 F.col("session_id"),
+             )
+             .distinct()
+    )
 
-# A short summary:
-print("\nTop 20 kept features (by importance) for transparency:")
-print(pd.DataFrame({"feature": list(keep)[:20],
-                    "importance": [get_imp(f) for f in list(keep)[:20]]}).sort_values("importance", ascending=False))
+    do_acct_nums = (
+        spark.table("sl1_do_tbl_customerproducts_h")
+             .filter(F.col("ods_business_dt").isin(do_custprod_parts))
+             .select(
+                 F.col("applicationid"),
+                 F.col("productnumber").cast("bigint").alias("accountnumber"),
+             )
+             .distinct()
+    )
 
-# If you want to see a sample of conflicts that caused drops:
-if not pairs.empty:
-    # join pairs with importance to show which side won
-    tmp = pairs.copy()
-    tmp["imp_f1"] = tmp["f1"].map(get_imp)
-    tmp["imp_f2"] = tmp["f2"].map(get_imp)
-    tmp["kept"]   = np.where(tmp["imp_f1"] >= tmp["imp_f2"], tmp["f1"], tmp["f2"])
-    tmp["dropped"]= np.where(tmp["imp_f1"] >= tmp["imp_f2"], tmp["f2"], tmp["f1"])
-    # only show those actually dropped by the greedy pass
-    sample = tmp[tmp["dropped"].isin(drop)].sort_values("corr", key=np.abs, ascending=False).head(25)
-    if not sample.empty:
-        print("\nExamples of highly correlated pairs where the lower-importance feature was dropped:")
-        print(sample[["f1","f2","corr","imp_f1","imp_f2","kept","dropped"]].to_string(index=False))
+    do_products = (
+        spark.table("sl1_do_tbl_productcd_h")
+             .filter(F.col("ods_business_dt").isin(do_prodcd_parts))
+             .select(
+                 F.col("productcd"),
+                 F.col("productid"),
+             )
+             .distinct()
+    )
+
+    do_prod_types = (
+        spark.table("sl1_do_tbl_producttype_h")
+             .filter(F.col("ods_business_dt").isin(do_prodtype_parts))
+             .select(
+                 F.col("productid"),
+                 F.col("producttype"),
+             )
+             .distinct()
+    )
+
+    # join to product metadata (unchanged join keys/logic you already had)
+    do_accts = (
+        do_acct_nums
+        .join(do_products, on="productcd", how="left")
+        .join(do_prod_types, on="productid", how="left")
+        # keep your original filters here (checking/savings/new banking, productid not null, session_id null handling, etc.)
+    )
+
+    # union DO with RCDS (or your other sources) and finish your lookup build
+    union_accts = rcds_accts.unionByName(do_accts, allowMissingColumns=True)
+
+    final_lookup = (
+        union_accts
+        .join(bp_base_pop, on=[F.col("session_id") == bp_base_pop.appid], how="left")  # keep your original join(s)
+        .select("datacollectionkey", "applicationid")  # your original projected columns
+        .distinct()
+    )
+
+    final_lookup.createOrReplaceTempView("do_account_lookup")
+
+    # ======================================================================
+    # <<< CHANGED DO accounts block ends
+    # ======================================================================
+
+    # ----------------------------------------------------------------------
+    # [unchanged code below here: any unpersist/cleanup/returns]
+    # ----------------------------------------------------------------------
 
