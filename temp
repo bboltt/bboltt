@@ -38,3 +38,11 @@ def _oao_partitions_covering(spark, table: str, first_date: str, last_date: str)
         cursor = cover_start
 
     return picked
+
+
+oao_dt1_list = _oao_partitions_covering(spark, "sl1_oao.tbl_application_h",     first_date, last_date)
+oao_dt2_list = _oao_partitions_covering(spark, "sl1_oao.tbl_customerproducts_h", first_date, last_date)
+oao_dt3_list = _oao_partitions_covering(spark, "sl1_oao.tbl_products_h",         first_date, last_date)
+oao_dt4_list = _oao_partitions_covering(spark, "sl1_oao.tbl_producttype_h",      first_date, last_date)
+
+# and use .isin(oao_dtX_list) in your filters
