@@ -1,43 +1,56 @@
 # rcif/…/application_history_functions.py (top of file or near other helpers)
 
-from datetime import datetime
+# --- REPLACE ONLY the body of get_oao_partitions_covering with this version ---
+from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
-from pyspark.sql import functions as F
 
-def _oao_partitions_covering(spark, table: str, first_date: str, last_date: str) -> list[str]:
+def get_oao_partitions_covering(
+    spark, table: str, first_date: str, last_date: str
+) -> List[str]:
     """
-    Returns partition dates (YYYY-MM-DD) from `table` so the union of their
+    Returns the minimal list of partition dates such that the union of their
     3-year snapshots covers [first_date, last_date].
+
+    Implementation note:
+    - Avoids scanning the table for all distinct partition dates.
+    - Uses get_closest_partition(spark, table, target_dt, get_after_date=True)
+      iteratively to hop backward in ~3-year steps.
     """
-    parts = (
-        spark.table(table)
-             .select(F.col("ods_business_dt").cast("date").alias("dt"))
-             .distinct()
-             .collect()
-    )
-    dates = sorted({r["dt"].strftime("%Y-%m-%d") for r in parts})
-    if not dates:
-        return []
+    picked: List[str] = []
 
-    def first_on_or_after(target: str) -> str:
-        for p in dates:
-            if p >= target:
-                return p
-        return dates[-1]
+    # seed with the partition on/after last_date
+    p = get_closest_partition(spark, table, last_date, get_after_date=True)
+    if not p:
+        raise ValueError(f"No partition on/after {last_date} for {table}")
+    picked.append(p)
 
-    picked = []
-    cursor = last_date
-    while True:
-        p = first_on_or_after(cursor)
-        if not picked or p != picked[-1]:
-            picked.append(p)
+    # walk backward until the 3-year coverage reaches first_date
+    # cap iterations defensively (should stay well under this)
+    MAX_HOPS = 24
+
+    for _ in range(MAX_HOPS):
         p_dt = datetime.strptime(p, "%Y-%m-%d")
-        cover_start = (p_dt - relativedelta(years=3)).strftime("%Y-%m-%d")
-        if cover_start <= first_date:
+        # this snapshot covers ~3 years before p_dt (inclusive).
+        # target the first date just beyond that coverage to continue walking back.
+        next_target = (p_dt - relativedelta(years=3)).strftime("%Y-%m-%d")
+
+        # if we've now covered the desired start, we're done
+        if next_target <= first_date:
             break
-        cursor = cover_start
+
+        q = get_closest_partition(spark, table, next_target, get_after_date=True)
+        if not q:
+            # no older partition found—stop to avoid looping
+            break
+        if q == picked[-1]:
+            # guard against accidental repeats
+            break
+
+        picked.append(q)
+        p = q
 
     return picked
+
 
 
 oao_dt1_list = _oao_partitions_covering(spark, "sl1_oao.tbl_application_h",     first_date, last_date)
